@@ -4,7 +4,7 @@ Build focused, ATS-friendly resumes in a private local workspace.
 
 Software built by Dhiraj Yadav for his own use, shared here for anyone who finds it useful.
 
-ResuFlow combines a desktop editor, browser UI, CLI, PDF export, and an MCP endpoint for the AI agent you choose. Your profile and resumes remain ordinary Markdown files on your computer—the application does not upload them or bundle them into its installation.
+ResuFlow combines a desktop editor, browser UI, CLI, A4 PDF printing, and an MCP endpoint for the AI agent you choose. Your profile and resumes remain ordinary Markdown files on your computer—the application does not upload them or bundle them into its installation.
 
 [Overview](#overview) · [Features](#features) · [How it works](#how-it-works) · [Install](#install) · [CLI](#command-line) · [MCP](#connect-an-ai-agent-with-mcp) · [Privacy](#local-first-by-design) · [Development](#development) · [Releases](#releases-and-updates) · [License](#license)
 
@@ -30,15 +30,15 @@ Profiles, resumes, memory, and custom agent skills live outside the application 
 
 ### Desktop and browser interface
 
-The Tauri desktop application starts a Node server bound to `127.0.0.1`. The same interface can be opened in the desktop window and a normal browser at the same time.
+The single-binary Rust + Tauri desktop application starts an in-process HTTP server bound to `127.0.0.1`. The same interface can be opened in the desktop window and a normal browser at the same time.
 
 ### Resume variants
 
-Create independent resumes for different roles while sharing profile and contact information. Each resume has its own Markdown source, preview, status, tags, and generated PDF.
+Create independent resumes for different roles while sharing profile and contact information. Each resume has its own Markdown source, live preview, status, and tags.
 
-### PDF export
+### Print to PDF
 
-Render the selected resume into print-ready A4 HTML and PDF. Chromium is installed by Playwright on the first PDF export if it is not already available, so that first export may require an internet connection.
+Render the selected resume into print-ready A4 HTML and print or save as PDF directly from the desktop webview or browser without requiring external browser downloads.
 
 ### Bring your own AI agent
 
@@ -52,17 +52,17 @@ The repository includes skills for resume research, impact writing, ATS optimiza
 
 ```text
 Desktop window or browser
-          |
-          v
-Local server on 127.0.0.1
-          |
-          +-- Web UI
-          +-- CLI
-          +-- MCP endpoint
-          +-- PDF renderer
-          |
-          v
-User-controlled workspace
+           |
+           v
+In-process Rust server on 127.0.0.1
+           |
+           +-- Web UI (TypeScript + Vite)
+           +-- CLI
+           +-- MCP endpoint
+           +-- Print-ready A4 HTML renderer
+           |
+           v
+User-controlled Markdown workspace
 ```
 
 On first desktop launch, ResuFlow creates `Documents/ResuFlow` unless another workspace is selected.
@@ -76,9 +76,6 @@ ResuFlow/
   resumes/
     <slug>/
       resume.md
-      dist/resume.pdf
-  dist/
-    <slug>.pdf
 ```
 
 The application never creates a Git repository in the workspace. Version control remains optional and user-controlled.
@@ -101,7 +98,7 @@ resuflow
 
 The installer adds ResuFlow to the current user's PATH. Uninstall it from **Windows Settings > Apps**; uninstall also removes the installer-managed PATH entry and never deletes resume workspaces.
 
-Windows packages include the Node sidecar, so users do not need Node.js, npm, Microsoft Store, or another package manager.
+Windows packages are self-contained native executables, so users do not need Node.js, npm, Microsoft Store, or another package manager.
 
 Windows releases are currently unsigned and can display a Microsoft Defender SmartScreen **Unknown publisher** warning. Verify the published SHA-256 checksum before running the installer. Code signing may be added later when the project has an appropriate signing service.
 
@@ -150,7 +147,7 @@ Run it with:
 resuflow
 ```
 
-Arch users can also rebuild from the published source tarball with the checked-in `distro/arch/PKGBUILD`. The package installs a `resuflow-cli` symlink with the same CLI commands, plus the desktop entry, icons, and licenses. `distro/linux/build-arch-package.sh` performs that build end to end (vendored dependency caches, pinned checksums, `makepkg`) and is the path CI runs.
+Arch users can also rebuild from the published source tarball with the checked-in `distro/arch/PKGBUILD`. The package installs `/usr/bin/resuflow` and a `resuflow-cli` symlink with the same CLI commands, plus the desktop entry, icons, and licenses. `distro/linux/build-arch-package.sh` performs that build end to end (vendored dependency caches, pinned checksums, `makepkg`) and is the path CI runs.
 
 ## Command line
 
@@ -161,7 +158,6 @@ resuflow [dir]               Open the desktop application
 resuflow --browser [dir]     Open the localhost UI in a browser
 resuflow serve [dir]         Start the localhost server only
 resuflow init [dir]          Create a resume workspace
-resuflow build [dir]         Generate PDFs for every resume
 resuflow --help              Show command help
 ```
 
@@ -177,10 +173,10 @@ Examples:
 ```bash
 resuflow init ~/Documents/my-resumes
 resuflow --browser ~/Documents/my-resumes
-resuflow build ~/Documents/my-resumes
+resuflow serve ~/Documents/my-resumes
 ```
 
-The server uses `http://127.0.0.1:4173/` by default. If that port is occupied, the desktop launcher starts its own verified sidecar on a free localhost port instead of trusting or reusing the existing process.
+The server uses `http://127.0.0.1:4173/` by default. If that port is occupied, the desktop app automatically binds to a free localhost port.
 
 ## Connect an AI agent with MCP
 
@@ -222,16 +218,17 @@ Copy the complete configuration, including the per-process token, from **Read do
 
 Requirements:
 
-- Node.js 20 or newer.
+- Node.js 20 or newer (for building the TypeScript + Vite frontend).
 - Rust stable.
 - Tauri system dependencies for the development operating system.
 
-Install dependencies and start the browser development workflow:
+Install dependencies, build the frontend, and run the desktop or browser mode:
 
 ```bash
 npm ci
-node bin/resuflow.mjs init ../my-resumes
-node bin/resuflow.mjs --browser --dir ../my-resumes
+npm run build
+cargo run --manifest-path src-tauri/Cargo.toml -- init ../my-resumes
+cargo run --manifest-path src-tauri/Cargo.toml -- --browser --dir ../my-resumes
 ```
 
 Run the desktop development shell:
@@ -243,8 +240,7 @@ npm run desktop:dev
 Useful verification commands:
 
 ```bash
-npm run version:check
-cargo test --manifest-path src-tauri/Cargo.toml
+npm run check
 ```
 
 User data must never be added to this repository. Use a workspace outside the source checkout for development and testing.
@@ -264,7 +260,7 @@ If both secrets are absent, the workflow publishes the unsigned tagged installer
 
 ### Linux releases
 
-The [desktop downloads workflow](.github/workflows/desktop.yml) builds the Arch Linux `resuflow` pacman package on every `v*` tag (and on manual runs). Tagged builds publish the `.pkg.tar.zst` plus its `.sha256` checksum, the source tarball and vendored npm/Cargo caches that feed `distro/arch/PKGBUILD`, and a GitHub build-provenance attestation covering all of them. The `verify-linux` job installs the package into a fresh `archlinux:base` container via both `pacman -U <url>` and `pacman -U <local file>`, upgrades over the existing install, runs the desktop entry, CLI, and bundled Node sidecar end to end, and blocks publication if any of it fails.
+The [desktop downloads workflow](.github/workflows/desktop.yml) builds the Arch Linux `resuflow` pacman package on every `v*` tag (and on manual runs). Tagged builds publish the `.pkg.tar.zst` plus its `.sha256` checksum, the source tarball and vendored npm/Cargo caches that feed `distro/arch/PKGBUILD`, and a GitHub build-provenance attestation covering all of them. The `verify-linux` job installs the package into a fresh `archlinux:base` container via both `pacman -U <url>` and `pacman -U <local file>`, upgrades over the existing install, runs the desktop entry, CLI, and local API server end to end, and blocks publication if any of it fails.
 
 Rebuild the exact release sources yourself with the checked-in PKGBUILD:
 
@@ -326,7 +322,7 @@ No. The application itself reads and writes the selected local workspace. An ext
 
 ### Is an AI subscription required?
 
-No. Resume editing, previewing, and PDF export work without an AI provider. MCP integration is optional.
+No. Resume editing, previewing, and PDF printing work without an AI provider. MCP integration is optional.
 
 ### Can I use both the desktop app and a browser?
 

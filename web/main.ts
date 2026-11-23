@@ -1,37 +1,57 @@
+import { api, withSlug } from './api';
+import type {
+  McpInfo,
+  Memory,
+  Profile,
+  ReleaseCheck,
+  Resume,
+  ResumeSummary,
+  Skill,
+  WorkspaceInfo,
+} from './types';
+
 if (new URLSearchParams(window.location.search).get('desktop') === '1') {
   document.documentElement.classList.add('desktop-app');
 }
 
-const app = document.querySelector('#app');
-const saveStatus = document.querySelector('#save-status');
-const releaseNotice = document.querySelector('#release-notice');
-const releaseTitle = document.querySelector('#release-title');
-const releaseDetail = document.querySelector('#release-detail');
-const releaseLink = document.querySelector('#release-link');
-const releaseDismiss = document.querySelector('#release-dismiss');
+const app = document.querySelector<HTMLElement>('#app')!;
+const saveStatus = document.querySelector<HTMLElement>('#save-status')!;
+const releaseNotice = document.querySelector<HTMLElement>('#release-notice')!;
+const releaseTitle = document.querySelector<HTMLElement>('#release-title')!;
+const releaseDetail = document.querySelector<HTMLElement>('#release-detail')!;
+const releaseLink = document.querySelector<HTMLAnchorElement>('#release-link')!;
+const releaseDismiss = document.querySelector<HTMLButtonElement>('#release-dismiss')!;
 
-const createDialog = document.querySelector('#create-dialog');
-const createForm = document.querySelector('#create-form');
-const createTitle = document.querySelector('#create-title');
-const createCancel = document.querySelector('#create-cancel');
-const skillDialog = document.querySelector('#skill-dialog');
-const skillForm = document.querySelector('#skill-form');
-const skillName = document.querySelector('#skill-name');
-const skillCancel = document.querySelector('#skill-cancel');
+const createDialog = document.querySelector<HTMLDialogElement>('#create-dialog')!;
+const createForm = document.querySelector<HTMLFormElement>('#create-form')!;
+const createTitle = document.querySelector<HTMLInputElement>('#create-title')!;
+const createCancel = document.querySelector<HTMLButtonElement>('#create-cancel')!;
+const skillDialog = document.querySelector<HTMLDialogElement>('#skill-dialog')!;
+const skillForm = document.querySelector<HTMLFormElement>('#skill-form')!;
+const skillName = document.querySelector<HTMLInputElement>('#skill-name')!;
+const skillCancel = document.querySelector<HTMLButtonElement>('#skill-cancel')!;
+
+type EditorState =
+  | { kind: 'resume'; resume: Resume }
+  | { kind: 'profile'; markdown: string }
+  | { kind: 'skill'; slug: string; markdown: string; source: 'builtin' | 'user' }
+  | { kind: 'memory'; markdown: string }
+  | null;
 
 let saveTimer = 0;
 let updateStatusTimer = 0;
-let editorState = null;
+let editorState: EditorState = null;
 
 window.addEventListener('hashchange', () => {
   closeSettingsMenu();
-  render();
+  void render();
 });
 
-const settingsBtn = document.querySelector('#settings-btn');
-const settingsDropdown = document.querySelector('#settings-dropdown');
-const openBrowserBtn = document.querySelector('#open-browser');
-const checkUpdatesBtn = document.querySelector('#check-updates');
+const settingsBtn = document.querySelector<HTMLButtonElement>('#settings-btn')!;
+const settingsDropdown = document.querySelector<HTMLElement>('#settings-dropdown')!;
+const openBrowserBtn = document.querySelector<HTMLButtonElement>('#open-browser')!;
+const checkUpdatesBtn = document.querySelector<HTMLButtonElement>('#check-updates')!;
+
 settingsBtn.addEventListener('click', (event) => {
   event.stopPropagation();
   const open = settingsDropdown.hidden;
@@ -45,83 +65,104 @@ openBrowserBtn.addEventListener('click', async () => {
     body: JSON.stringify({ hash: location.hash }),
   });
 });
-checkUpdatesBtn.addEventListener('click', () => checkForLatestRelease({ manual: true }));
+checkUpdatesBtn.addEventListener('click', () => void checkForLatestRelease({ manual: true }));
 document.addEventListener('click', (event) => {
-  if (!event.target.closest('.settings-menu')) closeSettingsMenu();
+  const target = event.target as Element | null;
+  if (!target?.closest('.settings-menu')) closeSettingsMenu();
 });
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') closeSettingsMenu();
 });
 
-function closeSettingsMenu() {
+function closeSettingsMenu(): void {
   settingsDropdown.hidden = true;
   settingsBtn.setAttribute('aria-expanded', 'false');
 }
+
 createCancel.addEventListener('click', () => createDialog.close());
 skillCancel.addEventListener('click', () => skillDialog.close());
+
 skillForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const name = skillName.value.trim();
   if (!name) return;
-  const skill = await api('skills', { method: 'POST', body: JSON.stringify({ name }) });
+  const skill = await api<Skill>('skills', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  });
   skillDialog.close();
   skillForm.reset();
   location.hash = `#/skills/${skill.slug}`;
 });
+
 createForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const title = createTitle.value.trim();
   if (!title) return;
-  const resume = await api('resumes', { method: 'POST', body: JSON.stringify({ title }) });
+  const resume = await api<Resume>('resumes', {
+    method: 'POST',
+    body: JSON.stringify({ title }),
+  });
   createDialog.close();
   createForm.reset();
   location.hash = `#/edit/${resume.slug}`;
 });
 
-await render();
-checkForLatestRelease();
+void render();
+void checkForLatestRelease();
 
-async function checkForLatestRelease({ manual = false } = {}) {
+async function checkForLatestRelease({ manual = false }: { manual?: boolean } = {}): Promise<void> {
   try {
-    const release = await api(`releases/latest${manual ? '?refresh=1' : ''}`);
+    const release = await api<ReleaseCheck>(`releases/latest${manual ? '?refresh=1' : ''}`);
     if (!release.available || !release.tagName || !release.url) {
       if (manual) showUpdateCheckStatus(`ResuFlow ${release.currentVersion} is up to date.`);
       return;
     }
-    if (!manual && localStorage.getItem('resuflow-dismissed-release') === release.tagName) return;
+    const tagName = release.tagName;
+    if (!manual && localStorage.getItem('resuflow-dismissed-release') === tagName) return;
 
-    releaseTitle.textContent = `${release.name || release.tagName} is available.`;
+    releaseTitle.textContent = `${release.name || tagName} is available.`;
     releaseDetail.textContent = `You are using ${release.currentVersion}. Review the release before updating.`;
     releaseLink.href = release.url;
     releaseNotice.hidden = false;
 
     releaseDismiss.onclick = () => {
-      localStorage.setItem('resuflow-dismissed-release', release.tagName);
+      localStorage.setItem('resuflow-dismissed-release', tagName);
       releaseNotice.hidden = true;
     };
   } catch {
-    // Release checks are optional and must never interrupt local work.
     if (manual) showUpdateCheckStatus('Could not check GitHub releases. Try again when online.');
   }
 }
 
-function showUpdateCheckStatus(message) {
-  clearTimeout(updateStatusTimer);
+function showUpdateCheckStatus(message: string): void {
+  window.clearTimeout(updateStatusTimer);
   const previousMessage = saveStatus.textContent;
   const wasHidden = saveStatus.hidden;
   saveStatus.hidden = false;
   saveStatus.textContent = message;
-  updateStatusTimer = setTimeout(() => {
+  updateStatusTimer = window.setTimeout(() => {
     if (saveStatus.textContent !== message) return;
     saveStatus.textContent = previousMessage;
     saveStatus.hidden = wasHidden;
   }, 4000);
 }
 
-async function render() {
+type Route =
+  | { name: 'dashboard' }
+  | { name: 'profile' }
+  | { name: 'skills' }
+  | { name: 'skill'; slug: string }
+  | { name: 'memory' }
+  | { name: 'vault' }
+  | { name: 'docs' }
+  | { name: 'edit' | 'preview'; slug: string };
+
+async function render(): Promise<void> {
   const route = parseRoute();
-  const backHome = document.querySelector('#back-home');
+  const backHome = document.querySelector<HTMLElement>('#back-home');
   if (backHome) backHome.hidden = route.name === 'dashboard';
+
   if (route.name === 'profile') {
     await renderProfileEditor();
     return;
@@ -153,35 +194,35 @@ async function render() {
   await renderDashboard();
 }
 
-function parseRoute() {
+function parseRoute(): Route {
   const hash = location.hash.replace(/^#/, '') || '/';
-  if (hash === '/profile' || hash === '/profile/edit' || hash === '/profile/preview') {
-    return { name: 'profile' };
-  }
+  if (hash === '/profile') return { name: 'profile' };
   if (hash === '/skills') return { name: 'skills' };
   if (hash === '/memory') return { name: 'memory' };
   if (hash === '/vault') return { name: 'vault' };
-  if (hash === '/docs' || hash.startsWith('/docs/') || hash === '/settings' || hash === '/mcp') {
-    return { name: 'docs' };
-  }
+  if (hash === '/docs' || hash.startsWith('/docs/')) return { name: 'docs' };
+
   const skill = hash.match(/^\/skills\/([^/]+)\/?$/);
   if (skill) return { name: 'skill', slug: decodeURIComponent(skill[1]) };
+
   const edit = hash.match(/^\/(edit|preview)\/([^/]+)\/?$/);
-  if (edit) return { name: edit[1], slug: decodeURIComponent(edit[2]) };
+  if (edit && (edit[1] === 'edit' || edit[1] === 'preview')) {
+    return { name: edit[1], slug: decodeURIComponent(edit[2]) };
+  }
   return { name: 'dashboard' };
 }
 
-async function renderDashboard() {
+async function renderDashboard(): Promise<void> {
   editorState = null;
   saveStatus.hidden = true;
-  const { resumes } = await api('resumes');
+  const { resumes } = await api<{ resumes: ResumeSummary[] }>('resumes');
 
   app.innerHTML = `
     <section class="hero">
       <div>
         <p class="eyebrow">Local workspace</p>
         <h1>Your resumes</h1>
-        <p class="lede">Everything is Markdown. Use Edit to write, Preview to see the page.</p>
+        <p class="lede">Everything is Markdown. Use Edit to write, Preview to see and print the A4 page.</p>
       </div>
       <div class="actions">
         <button class="primary" id="new-resume">New resume</button>
@@ -198,50 +239,52 @@ async function renderDashboard() {
     <section id="resume-grid" class="resume-list-wrap"></section>
   `;
 
-  const grid = app.querySelector('#resume-grid');
-  const search = app.querySelector('#resume-search');
-  const draw = (items) => {
+  const grid = app.querySelector<HTMLElement>('#resume-grid')!;
+  const search = app.querySelector<HTMLInputElement>('#resume-search')!;
+
+  const draw = (items: ResumeSummary[]) => {
     if (!items.length) {
-      grid.innerHTML = `<div class="empty-state"><h2>No resumes yet</h2><p>Create a resume, then write it in Markdown. Preview renders the designed page.</p></div>`;
+      grid.innerHTML = `<div class="empty-state"><h2>No resumes yet</h2><p>Create a resume, then write it in Markdown. Preview renders the designed A4 page.</p></div>`;
       return;
     }
     grid.innerHTML = `<ul class="resume-list">${items.map(listItemHtml).join('')}</ul>`;
   };
   draw(resumes);
+
   search.addEventListener('input', () => {
     const query = search.value.trim().toLowerCase();
-    draw(resumes.filter((resume) => [resume.title, resume.summary, ...(resume.tags || [])].join(' ').toLowerCase().includes(query)));
+    draw(
+      resumes.filter((resume) =>
+        [resume.title, resume.summary, ...(resume.tags || [])].join(' ').toLowerCase().includes(query),
+      ),
+    );
   });
 
-  app.querySelector('#new-resume').addEventListener('click', () => {
+  app.querySelector<HTMLButtonElement>('#new-resume')!.addEventListener('click', () => {
     createTitle.value = '';
     createDialog.showModal();
     createTitle.focus();
   });
 
   grid.addEventListener('click', async (event) => {
-    const button = event.target.closest('[data-action]');
+    const target = event.target as Element | null;
+    const button = target?.closest<HTMLButtonElement>('[data-action]');
     if (!button) return;
     const slug = button.dataset.slug;
+    if (!slug) return;
+
     if (button.dataset.action === 'delete') {
       if (!confirm(`Delete ${slug}? This cannot be undone.`)) return;
       await api('resume', withSlug(slug, { method: 'DELETE' }));
       await renderDashboard();
     }
-    if (button.dataset.action === 'pdf') {
-      button.disabled = true;
-      try {
-        await api('resume/pdf', withSlug(slug, { method: 'POST' }));
-        window.location = `/api/resumes/${encodeURIComponent(slug)}/pdf`;
-      } finally {
-        button.disabled = false;
-      }
+    if (button.dataset.action === 'print') {
+      printResume(slug);
     }
   });
-
 }
 
-function listItemHtml(resume) {
+function listItemHtml(resume: ResumeSummary): string {
   return `
     <li class="resume-row">
       <a class="resume-title" href="#/edit/${encodeURIComponent(resume.slug)}">${escapeHtml(resume.title)}</a>
@@ -250,17 +293,18 @@ function listItemHtml(resume) {
       <div class="row-actions">
         <a class="secondary" href="#/edit/${encodeURIComponent(resume.slug)}">Edit</a>
         <a class="secondary" href="#/preview/${encodeURIComponent(resume.slug)}">Preview</a>
-        <button class="secondary" data-action="pdf" data-slug="${escapeHtml(resume.slug)}">PDF</button>
+        <button class="secondary" data-action="print" data-slug="${escapeHtml(resume.slug)}">Print / PDF</button>
         <button class="danger" data-action="delete" data-slug="${escapeHtml(resume.slug)}">Delete</button>
       </div>
     </li>
   `;
 }
 
-async function renderSkills() {
+async function renderSkills(): Promise<void> {
   editorState = null;
   saveStatus.hidden = true;
-  const { skills } = await api('skills');
+  const { skills } = await api<{ skills: Skill[] }>('skills');
+
   app.innerHTML = `
     <section class="hero">
       <div>
@@ -271,7 +315,9 @@ async function renderSkills() {
       <button class="primary" id="new-skill">New skill</button>
     </section>
     <ul class="resume-list">
-      ${skills.map((skill) => `
+      ${skills
+        .map(
+          (skill) => `
         <li class="resume-row">
           <a class="resume-title" href="#/skills/${encodeURIComponent(skill.slug)}">${escapeHtml(skill.name)}</a>
           <span class="badge">${escapeHtml(skill.source)}${skill.enabled === false ? ' · off' : ''}</span>
@@ -282,37 +328,52 @@ async function renderSkills() {
             ${skill.source === 'user' ? `<button class="danger" data-action="delete-skill" data-slug="${escapeHtml(skill.slug)}">Delete</button>` : ''}
           </div>
         </li>
-      `).join('')}
+      `,
+        )
+        .join('')}
     </ul>
   `;
-  app.querySelector('#new-skill').addEventListener('click', () => {
+
+  app.querySelector<HTMLButtonElement>('#new-skill')!.addEventListener('click', () => {
     skillName.value = '';
     skillDialog.showModal();
     skillName.focus();
   });
-  app.querySelector('.resume-list').addEventListener('click', async (event) => {
-    const toggle = event.target.closest('[data-action=toggle-skill]');
-    if (toggle) {
+
+  app.querySelector<HTMLElement>('.resume-list')!.addEventListener('click', async (event) => {
+    const target = event.target as Element | null;
+    const toggle = target?.closest<HTMLButtonElement>('[data-action=toggle-skill]');
+    if (toggle && toggle.dataset.slug) {
       const enabled = toggle.dataset.enabled !== 'true';
-      await api('skill/enabled', withSlug(toggle.dataset.slug, {
-        method: 'PUT',
-        body: JSON.stringify({ enabled }),
-      }));
+      await api(
+        'skill/enabled',
+        withSlug(toggle.dataset.slug, {
+          method: 'PUT',
+          body: JSON.stringify({ enabled }),
+        }),
+      );
       await renderSkills();
       return;
     }
-    const remove = event.target.closest('[data-action=delete-skill]');
-    if (!remove) return;
+    const remove = target?.closest<HTMLButtonElement>('[data-action=delete-skill]');
+    if (!remove || !remove.dataset.slug) return;
     if (!confirm(`Delete skill ${remove.dataset.slug}?`)) return;
     await api('skill', withSlug(remove.dataset.slug, { method: 'DELETE' }));
     await renderSkills();
   });
 }
 
-async function renderSkillEditor(slug) {
-  const skill = await api('skill', withSlug(slug));
-  editorState = { kind: 'skill', slug, markdown: skill.markdown, source: skill.source };
+async function renderSkillEditor(slug: string): Promise<void> {
+  const skill = await api<Skill>('skill', withSlug(slug));
+  const skillEditorState = {
+    kind: 'skill' as const,
+    slug,
+    markdown: skill.markdown,
+    source: skill.source,
+  };
+  editorState = skillEditorState;
   saveStatus.hidden = skill.source === 'builtin';
+
   app.innerHTML = `
     <section class="doc">
       <div class="doc-toolbar">
@@ -323,51 +384,69 @@ async function renderSkillEditor(slug) {
       <textarea class="md-editor" id="markdown" ${skill.source === 'builtin' ? 'readonly' : ''} spellcheck="true">${escapeHtml(skill.markdown)}</textarea>
     </section>
   `;
-  const editor = app.querySelector('#markdown');
+
+  const editor = app.querySelector<HTMLTextAreaElement>('#markdown')!;
   if (skill.source !== 'builtin') {
     editor.addEventListener('input', () => {
-      editorState.markdown = editor.value;
+      skillEditorState.markdown = editor.value;
       queueSave(async () => {
-        await api('skill', withSlug(slug, { method: 'PUT', body: JSON.stringify({ markdown: editorState.markdown }) }));
+        await api(
+          'skill',
+          withSlug(slug, {
+            method: 'PUT',
+            body: JSON.stringify({ markdown: skillEditorState.markdown }),
+          }),
+        );
         saveStatus.textContent = 'Saved';
       });
     });
   }
   editor.focus();
-  app.querySelector('#toggle-skill').addEventListener('click', async () => {
-    await api('skill/enabled', withSlug(slug, {
-      method: 'PUT',
-      body: JSON.stringify({ enabled: skill.enabled === false }),
-    }));
+
+  app.querySelector<HTMLButtonElement>('#toggle-skill')!.addEventListener('click', async () => {
+    await api(
+      'skill/enabled',
+      withSlug(slug, {
+        method: 'PUT',
+        body: JSON.stringify({ enabled: skill.enabled === false }),
+      }),
+    );
     await renderSkillEditor(slug);
   });
 }
 
-async function renderMemory() {
-  const memory = await api('memory');
-  editorState = { kind: 'memory', markdown: memory.markdown };
+async function renderMemory(): Promise<void> {
+  const memory = await api<Memory>('memory');
+  const memoryEditorState = { kind: 'memory' as const, markdown: memory.markdown };
+  editorState = memoryEditorState;
   saveStatus.hidden = false;
+
   app.innerHTML = `
     <section class="doc">
       <textarea class="md-editor" id="markdown" spellcheck="true" aria-label="Memory Markdown">${escapeHtml(memory.markdown)}</textarea>
     </section>
   `;
-  const editor = app.querySelector('#markdown');
+
+  const editor = app.querySelector<HTMLTextAreaElement>('#markdown')!;
   editor.addEventListener('input', () => {
-    editorState.markdown = editor.value;
+    memoryEditorState.markdown = editor.value;
     queueSave(async () => {
-      await api('memory', { method: 'PUT', body: JSON.stringify({ markdown: editorState.markdown }) });
+      await api('memory', {
+        method: 'PUT',
+        body: JSON.stringify({ markdown: memoryEditorState.markdown }),
+      });
       saveStatus.textContent = 'Saved';
     });
   });
   editor.focus();
 }
 
-async function renderVault() {
+async function renderVault(): Promise<void> {
   editorState = null;
   saveStatus.hidden = true;
-  const workspace = await api('workspace');
+  const workspace = await api<WorkspaceInfo>('workspace');
   const recent = (workspace.recentVaults || []).filter((item) => item && item !== workspace.root);
+
   app.innerHTML = `
     <section class="doc">
       <form id="vault-form" class="empty-state">
@@ -380,22 +459,33 @@ async function renderVault() {
           <button class="primary" type="submit" data-mode="switch">Switch vault</button>
           <button class="secondary" type="submit" data-mode="init">Create vault here</button>
         </div>
-        ${recent.length ? `<h3>Recent</h3><ul class="resume-list">${recent.map((item) => `
+        ${
+          recent.length
+            ? `<h3>Recent</h3><ul class="resume-list">${recent
+                .map(
+                  (item) => `
           <li class="resume-row">
             <span class="resume-title">${escapeHtml(item)}</span>
             <div class="row-actions">
               <button type="button" class="secondary" data-recent="${escapeHtml(item)}">Use</button>
             </div>
           </li>
-        `).join('')}</ul>` : ''}
+        `,
+                )
+                .join('')}</ul>`
+            : ''
+        }
       </form>
     </section>
   `;
-  const form = app.querySelector('#vault-form');
-  const input = form.querySelector('input[name=root]');
+
+  const form = app.querySelector<HTMLFormElement>('#vault-form')!;
+  const input = form.querySelector<HTMLInputElement>('input[name=root]')!;
+
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const mode = event.submitter?.dataset.mode || 'switch';
+    const submitter = event.submitter as HTMLElement | null;
+    const mode = submitter?.dataset.mode || 'switch';
     try {
       await api('workspace', {
         method: 'PUT',
@@ -409,22 +499,24 @@ async function renderVault() {
       await render();
     } catch (error) {
       saveStatus.hidden = false;
-      saveStatus.textContent = error.message;
+      saveStatus.textContent = error instanceof Error ? error.message : String(error);
     }
   });
-  form.querySelectorAll('[data-recent]').forEach((button) => {
+
+  form.querySelectorAll<HTMLButtonElement>('[data-recent]').forEach((button) => {
     button.addEventListener('click', () => {
-      input.value = button.dataset.recent;
-      form.requestSubmit(form.querySelector('[data-mode=switch]'));
+      input.value = button.dataset.recent || '';
+      form.requestSubmit(form.querySelector<HTMLButtonElement>('[data-mode=switch]'));
     });
   });
 }
 
-async function renderDocs() {
+async function renderDocs(): Promise<void> {
   editorState = null;
   saveStatus.hidden = true;
-  const info = await api('mcp');
-  const snippet = JSON.stringify(info.generic, null, 2);
+  const info = await api<McpInfo>('mcp');
+  const snippet = JSON.stringify(info.config, null, 2);
+
   app.innerHTML = `
     <article class="docs-page">
       <header class="docs-hero">
@@ -445,13 +537,13 @@ async function renderDocs() {
 
       <section class="docs-section" id="docs-overview">
         <h2>Overview</h2>
-        <p>ResuFlow is a local app. It does not run an LLM. You write Markdown in the UI, or you point Grok, Cursor, Codex, Gemini, or another agent at this process over MCP.</p>
+        <p>ResuFlow is a native Rust + Tauri desktop application. It does not run an LLM. You write Markdown in the UI, or you point Grok, Cursor, Codex, Gemini, or another agent at this process over MCP.</p>
         <p>The product (this install) is separate from your data. Resumes live in a workspace folder under Documents; first launch creates a default vault automatically.</p>
       </section>
 
       <section class="docs-section" id="docs-install">
         <h2>Install and run</h2>
-        <p>Windows users can download the installer from the product website; Node.js and npm are bundled. On Arch Linux, install the pacman package straight from its release URL, or download it first and install from the local file — both forms also upgrade an existing install.</p>
+        <p>Windows users can download the installer from the product website. On Arch Linux, install the pacman package straight from its release URL, or download it first and install from the local file — both forms also upgrade an existing install.</p>
         <pre>Windows: download and run the .exe installer
 Linux (Arch): sudo pacman -U https://github.com/exolithelabs/resuflow/releases/latest/download/resuflow-linux-x86_64.pkg.tar.zst
 Linux (Arch, local file): cd ~/Downloads && sudo pacman -U ./resuflow-linux-x86_64.pkg.tar.zst</pre>
@@ -468,12 +560,12 @@ Linux (Arch, local file): cd ~/Downloads && sudo pacman -U ./resuflow-linux-x86_
       <section class="docs-section" id="docs-workspace">
         <h2>Workspace</h2>
         <p>Open <strong>Vault</strong> from the settings gear to see the path or change the default vault. Typical layout:</p>
-        <pre>profile.md
+        <pre>resuflow.json
+profile.md
 memory.md
 skills/disabled.json
 skills/&lt;slug&gt;/SKILL.md
-resumes/&lt;slug&gt;/resume.md
-resumes/&lt;slug&gt;/dist/resume.pdf</pre>
+resumes/&lt;slug&gt;/resume.md</pre>
         <p>Do not put personal resume data in the app install. Git in the vault is optional and not created automatically.</p>
       </section>
 
@@ -482,8 +574,8 @@ resumes/&lt;slug&gt;/dist/resume.pdf</pre>
         <p>The home page is a list. Create a resume, then use <strong>Edit</strong> and <strong>Preview</strong>.</p>
         <ul>
           <li>Edit is the Markdown file, including YAML frontmatter (<code>title</code>, <code>status</code>, <code>tags</code>).</li>
-          <li>Preview renders the designed page.</li>
-          <li>PDF prints that preview to A4.</li>
+          <li>Preview renders the designed A4 page.</li>
+          <li>Print / PDF opens the native print dialog to save a clean A4 PDF.</li>
           <li>Changes autosave.</li>
         </ul>
         <p>The header <strong>← All resumes</strong> link appears on resume, profile, skills, memory, and docs pages — not on the home list.</p>
@@ -515,63 +607,68 @@ resumes/&lt;slug&gt;/dist/resume.pdf</pre>
         <p>Example config:</p>
         <pre>${escapeHtml(snippet)}</pre>
         <p>This configuration contains a private per-process bearer token. Do not publish or commit it; copy a fresh configuration after restarting ResuFlow.</p>
-        <p>Tools include list/get/write for resumes, profile, skills, and memory, plus create resume, enable-aware skill listing, and PDF-related files on disk after you export.</p>
+        <p>Tools include list/get/write for resumes, profile, skills, and memory, plus create resume and enable-aware skill listing.</p>
       </section>
     </article>
   `;
+
   const hash = location.hash.replace(/^#/, '');
-  const key = hash === '/mcp' ? 'mcp' : hash.replace(/^\/docs\/?/, '');
+  const key = hash.replace(/^\/docs\/?/, '');
   const target = document.getElementById(key ? `docs-${key}` : 'docs-overview');
   if (target && key) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-async function renderProfileEditor() {
+async function renderProfileEditor(): Promise<void> {
   if (!editorState || editorState.kind !== 'profile') {
-    const profile = await api('profile');
+    const profile = await api<Profile>('profile');
     editorState = { kind: 'profile', markdown: profile.markdown };
   }
+  const profileState = editorState;
   saveStatus.hidden = false;
 
   app.innerHTML = `
     <section class="doc">
-      <textarea class="md-editor" id="markdown" spellcheck="true" aria-label="Profile Markdown">${escapeHtml(editorState.markdown)}</textarea>
+      <textarea class="md-editor" id="markdown" spellcheck="true" aria-label="Profile Markdown">${escapeHtml(profileState.markdown)}</textarea>
     </section>
   `;
 
-  const editor = app.querySelector('#markdown');
+  const editor = app.querySelector<HTMLTextAreaElement>('#markdown');
   if (editor) {
     editor.addEventListener('input', () => {
-      editorState.markdown = editor.value;
+      profileState.markdown = editor.value;
       queueSave(saveProfileEditor);
     });
     editor.focus();
   }
 }
 
-async function saveProfileEditor() {
+async function saveProfileEditor(): Promise<void> {
   if (!editorState || editorState.kind !== 'profile') return;
   saveStatus.textContent = 'Saving…';
-  const saved = await api('profile', {
+  const saved = await api<Profile>('profile', {
     method: 'PUT',
     body: JSON.stringify({ markdown: editorState.markdown }),
   });
-  editorState.markdown = saved.markdown;
+  if (editorState && editorState.kind === 'profile') {
+    editorState.markdown = saved.markdown;
+  }
   saveStatus.textContent = 'Saved';
 }
 
-async function renderEditor(slug, mode) {
+async function renderEditor(slug: string, mode: 'edit' | 'preview'): Promise<void> {
   if (editorState?.kind === 'resume' && editorState.resume.slug === slug) {
     if (mode === 'preview') await saveEditor();
   } else {
-    const resume = await api('resume', withSlug(slug));
+    const resume = await api<Resume>('resume', withSlug(slug));
     editorState = { kind: 'resume', resume };
   }
   paintEditor(mode);
 }
 
-function paintEditor(mode) {
-  if (!editorState) return;
-  const { resume } = editorState;
+function paintEditor(mode: 'edit' | 'preview'): void {
+  if (!editorState || editorState.kind !== 'resume') return;
+  const resumeState = editorState;
+  const { resume } = resumeState;
   const slug = resume.slug;
   saveStatus.hidden = false;
 
@@ -582,78 +679,85 @@ function paintEditor(mode) {
           <a class="mode${mode === 'edit' ? ' active' : ''}" href="#/edit/${encodeURIComponent(slug)}">Edit</a>
           <a class="mode${mode === 'preview' ? ' active' : ''}" href="#/preview/${encodeURIComponent(slug)}">Preview</a>
         </div>
-        <button type="button" class="secondary" id="export-pdf">Download PDF</button>
+        <button type="button" class="secondary" id="print-resume">Print / PDF</button>
       </div>
-      ${mode === 'edit' ? `
+      ${
+        mode === 'edit'
+          ? `
         <textarea class="md-editor" id="markdown" spellcheck="true" aria-label="Resume Markdown">${escapeHtml(resume.markdown)}</textarea>
-      ` : `
-        <iframe class="preview-frame" id="preview" title="Resume preview" sandbox="allow-popups allow-popups-to-escape-sandbox" src="/preview/${encodeURIComponent(slug)}?t=${Date.now()}"></iframe>
-      `}
+      `
+          : `
+        <iframe class="preview-frame" id="preview" title="Resume preview" src="/preview/${encodeURIComponent(slug)}?t=${Date.now()}"></iframe>
+      `
+      }
     </section>
   `;
 
-  const editor = app.querySelector('#markdown');
+  const editor = app.querySelector<HTMLTextAreaElement>('#markdown');
   if (editor) {
     editor.addEventListener('input', () => {
-      editorState.resume.markdown = editor.value;
+      resumeState.resume.markdown = editor.value;
       queueSave(saveEditor);
     });
     editor.focus();
   }
 
-  app.querySelector('#export-pdf').addEventListener('click', async () => {
+  app.querySelector<HTMLButtonElement>('#print-resume')!.addEventListener('click', async () => {
     await saveEditor();
-    await api('resume/pdf', withSlug(slug, { method: 'POST' }));
-    window.location = `/api/resumes/${encodeURIComponent(slug)}/pdf`;
+    printResume(slug);
   });
 }
 
-async function saveEditor() {
-  if (!editorState) return;
+function printResume(slug: string): void {
+  const existingFrame = app.querySelector<HTMLIFrameElement>('#preview');
+  if (existingFrame?.contentWindow) {
+    existingFrame.contentWindow.focus();
+    existingFrame.contentWindow.print();
+    return;
+  }
+
+  const frame = document.createElement('iframe');
+  frame.style.position = 'fixed';
+  frame.style.width = '0';
+  frame.style.height = '0';
+  frame.style.border = '0';
+  frame.src = `/preview/${encodeURIComponent(slug)}?t=${Date.now()}`;
+  frame.addEventListener('load', () => {
+    frame.contentWindow?.focus();
+    frame.contentWindow?.print();
+    window.setTimeout(() => frame.remove(), 1000);
+  });
+  document.body.appendChild(frame);
+}
+
+async function saveEditor(): Promise<void> {
+  if (!editorState || editorState.kind !== 'resume') return;
   saveStatus.textContent = 'Saving…';
-  const saved = await api('resume', withSlug(editorState.resume.slug, {
-    method: 'PUT',
-    body: JSON.stringify({ markdown: editorState.resume.markdown }),
-  }));
-  editorState.resume = saved;
+  const saved = await api<Resume>(
+    'resume',
+    withSlug(editorState.resume.slug, {
+      method: 'PUT',
+      body: JSON.stringify({ markdown: editorState.resume.markdown }),
+    }),
+  );
+  if (editorState && editorState.kind === 'resume') {
+    editorState.resume = saved;
+  }
   saveStatus.textContent = 'Saved';
 }
 
-function queueSave(fn) {
+function queueSave(fn: () => Promise<void>): void {
   saveStatus.hidden = false;
   saveStatus.textContent = 'Saving…';
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => fn().catch((error) => {
-    saveStatus.textContent = error.message;
-  }), 400);
+  window.clearTimeout(saveTimer);
+  saveTimer = window.setTimeout(() => {
+    fn().catch((error: unknown) => {
+      saveStatus.textContent = error instanceof Error ? error.message : String(error);
+    });
+  }, 400);
 }
 
-async function api(endpoint, options = {}) {
-  const response = await fetch(`/api/${endpoint}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-ResuFlow-Request': '1',
-      ...(options.headers || {}),
-    },
-  });
-  if (response.status === 204) return null;
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
-  return payload;
-}
-
-function withSlug(slug, options = {}) {
-  return {
-    ...options,
-    headers: {
-      'X-ResuFlow-Slug': String(slug),
-      ...(options.headers || {}),
-    },
-  };
-}
-
-function escapeHtml(value) {
+function escapeHtml(value: unknown): string {
   return String(value ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')

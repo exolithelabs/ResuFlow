@@ -6,7 +6,7 @@
   <name>ResuFlow</name>
   <summary>Build tailored, ATS-friendly resumes in a local workspace.</summary>
   <description>
-    <p>ResuFlow is a local-first desktop app for role-specific resumes: Markdown editing, print-ready previews, PDF export, and an MCP endpoint for the AI agent you choose. Profile and resume data stay in a user-controlled workspace outside the application.</p>
+    <p>ResuFlow is a local-first desktop app for role-specific resumes: Markdown editing, print-ready A4 previews, and an MCP endpoint for the AI agent you choose. Profile and resume data stay in a user-controlled workspace outside the application.</p>
   </description>
   <launchable type="desktop-id">resuflow.desktop</launchable>
   <url type="homepage">https://github.com/exolithelabs/resuflow</url>
@@ -22,7 +22,8 @@
   </content_rating>
   <categories>
     <category>Office</category>
-  </categories>  <icon type="cached" width="32" height="32">resuflow.png</icon>
+  </categories>
+  <icon type="cached" width="32" height="32">resuflow.png</icon>
   <icon type="cached" width="128" height="128">resuflow.png</icon>
   <icon type="cached" width="512" height="512">resuflow.png</icon>
   <provides>

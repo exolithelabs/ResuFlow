@@ -21,49 +21,26 @@
   "bugs": {
     "url": "https://github.com/exolithelabs/resuflow/issues"
   },
-  "bin": {
-    "resuflow": "./bin/resuflow.mjs"
-  },
-  "files": [
-    "bin",
-    "src",
-    "web",
-    "templates",
-    "skills",
-    "desktop",
-    "LICENSE",
-    "NOTICE",
-    "THIRD-PARTY-NOTICES.md",
-    "readme.md",
-    "AGENTS.md"
-  ],
   "scripts": {
-    "test": "node --test",
-    "start": "node bin/resuflow.mjs",
-    "serve": "node bin/resuflow.mjs serve --browser",
-    "desktop": "node bin/resuflow.mjs desktop",
-    "desktop:prepare": "node scripts/prepare-desktop-sidecar.mjs",
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "check": "npm run typecheck && npm run version:check && npm run distro:check && npm test",
     "tauri": "tauri",
-    "desktop:dev": "npm run desktop:prepare && tauri dev",
-    "desktop:build": "npm run desktop:prepare && tauri build",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build",
     "version:check": "node scripts/version.mjs --check",
     "version:set": "node scripts/version.mjs --set",
     "distro:check": "node scripts/distro-check.mjs",
-    "distro:build": "bash distro/linux/build-arch-package.sh",
-    "resuflow": "node bin/resuflow.mjs"
+    "distro:build": "bash distro/linux/build-arch-package.sh"
   },
   "engines": {
     "node": ">=20"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "marked": "^18.0.13",
-    "open": "^11.0.3",
-    "playwright": "^1.63.0",
-    "sanitize-html": "^2.17.7",
-    "zod": "^4.6.4"
-  },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.11.4"
+    "@tauri-apps/cli": "^2.11.4",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
   }
 }

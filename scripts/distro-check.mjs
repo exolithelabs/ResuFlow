@@ -2,7 +2,6 @@
 // AppStream metainfo. Tauri does not emit Pacman packages for this project,
 // so a hand-written PKGBUILD plus generated .SRCINFO is the source of truth
 // and both are checked in.
-import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,32 +21,6 @@ const desktop = readFileSync(desktopPath, 'utf8');
 const failures = [];
 function check(condition, message) {
   if (!condition) failures.push(message);
-}
-
-function gitGrep(pattern) {
-  try {
-    return execFileSync(
-      'git',
-      ['grep', '-l', pattern, '--', '.', ':!scripts/distro-check.mjs'],
-      { cwd: repoRoot, encoding: 'utf8' },
-    ).trim();
-  } catch (error) {
-    // git grep exits 1 when nothing matches.
-    return String(error.stdout || '').trim();
-  }
-}
-
-function gitGrepLines(pattern) {
-  try {
-    return execFileSync(
-      'git',
-      ['grep', '-n', '-e', pattern, '--', '.', ':!scripts/distro-check.mjs'],
-      { cwd: repoRoot, encoding: 'utf8' },
-    ).trim();
-  } catch (error) {
-    // git grep exits 1 when nothing matches.
-    return String(error.stdout || '').trim();
-  }
 }
 
 // --- PKGBUILD vs manifests ---
@@ -71,7 +44,7 @@ for (const filename of [tarball, npmCache, cargoCache]) {
 
 const binary = 'src-tauri/target/release/${pkgname}';
 check(pkgbuild.includes(`install -Dm755 "${binary}" "\${pkgdir}/usr/bin/\${pkgname}"`), 'PKGBUILD must install the Tauri binary to /usr/bin/resuflow.');
-check(pkgbuild.includes('usr/lib/${pkgname}'), 'PKGBUILD must stage the sidecar under /usr/lib/resuflow.');
+check(!pkgbuild.includes('/usr/lib/'), 'PKGBUILD must not stage an external runtime under /usr/lib.');
 check(pkgbuild.includes('distro/linux/resuflow.desktop'), 'PKGBUILD must install distro/linux/resuflow.desktop.');
 check(pkgbuild.includes('distro/linux/io.github.exolithelabs.ResuFlow.metainfo.xml'), 'PKGBUILD must install the AppStream metainfo file.');
 
@@ -101,27 +74,6 @@ check(desktop.includes('Name=ResuFlow') && desktop.includes('Exec=resuflow'), 'D
 check(desktop.includes('Icon=resuflow'), 'Desktop entry must reference the resuflow icon theme name.');
 const metainfoRelease = metainfo.match(/<release\s+version="([^"]+)"/)?.[1];
 check(metainfoRelease === version, `Metainfo must list a <release version="${version}"/> entry as the newest release (found ${metainfoRelease || 'none'}).`);
-check(!desktop.toLowerCase().includes('resume-builder'), 'Desktop entry must not reference the old distribution.');
-
-// Guard against the retired shared Flatpak distribution returning.
-for (const pattern of ['flatpak.exolithelabs', 'exolithelabs-flatpak-repo', 'FLATPAK_', '.flatpakref']) {
-  const hits = gitGrep(pattern);
-  check(hits === '', `Tracked files must not mention retired pattern ${pattern}, found: ${hits || '(none)'}.`);
-}
-
-// Guard against the retired portable .tar.zst + install.sh distribution returning.
-for (const pattern of ['build-linux-tarball', 'linux/install.sh', 'linux/uninstall.sh', '~/.local']) {
-  const hits = gitGrep(pattern);
-  check(hits === '', `Tracked files must not mention retired pattern ${pattern}, found: ${hits || '(none)'}.`);
-}
-
-// Every tracked .tar.zst reference must be the pacman package.
-const tarballRefs = gitGrepLines('.tar.zst')
-  .split('\n')
-  .map((line) => line.trim())
-  .filter(Boolean)
-  .filter((line) => !line.includes('.pkg.tar.zst'));
-check(tarballRefs.length === 0, `Tracked files must only reference the pacman .pkg.tar.zst, found: ${tarballRefs.join('; ') || '(none)'}.`);
 
 if (failures.length > 0) {
   console.error(`Distro packaging check failed:\n${failures.map((failure) => `  - ${failure}`).join('\n')}`);

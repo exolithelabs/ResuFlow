@@ -4,18 +4,17 @@ This repository is the **ResuFlow product**: a Windows direct-download desktop a
 
 ## Product model
 
-- `bin/resuflow.mjs` is the CLI entrypoint.
-- `src/` is the Node CLI, workspace I/O, HTTP API, PDF export, and desktop launcher.
-- `web/` is the localhost Web UI (browser and Tauri webview).
-- `src-tauri/` is the Tauri desktop shell. Shipping packages bundle Node and the app sources as a self-contained sidecar and load `http://127.0.0.1:4173/`.
+- `src-tauri/` is the self-contained Rust + Tauri backend, desktop shell, CLI (`resuflow`), workspace I/O, print-ready A4 Markdown renderer, HTTP API (`127.0.0.1`), and MCP server (`/mcp`). Shipping packages are a single Rust binary with zero Node.js runtime.
+- `web/` is the TypeScript + Vite frontend (`web/main.ts`, `web/api.ts`, `web/types.ts`, `web/styles.css`, `web/index.html`), compiled into `dist/` and embedded directly into the Rust binary.
 - `distro/` is the Linux packaging source of truth: `distro/arch/PKGBUILD` plus generated `distro/arch/.SRCINFO` for pacman, the shared `resuflow.desktop` entry and AppStream metainfo under `distro/linux/`, and `distro/linux/build-arch-package.sh`, which builds the `.pkg.tar.zst` in CI.
 - The Windows installer and the Arch Linux package are produced in GitHub Actions (`.github/workflows/desktop.yml`), not locally. Windows releases are currently unsigned and include a SHA-256 checksum plus GitHub provenance attestation. Tagged releases publish the Arch package, its checksum, the PKGBUILD input tarballs, and build-provenance attestations as GitHub Release assets.
 - Windows packages are downloaded from the product website. Arch packages are downloaded from the latest GitHub release; manually rebuilding with the checked-in PKGBUILD is supported.
-- `templates/` renders structured JSON to print-ready HTML.
 - User data is **never** stored in this repo. It belongs in the workspace:
-  - `profile.json`
-  - `resumes/<slug>/resume.json`
-  - generated PDFs under `resumes/<slug>/dist/` and `dist/`
+  - `resuflow.json`
+  - `profile.md`
+  - `memory.md`
+  - `skills/<slug>/SKILL.md`
+  - `resumes/<slug>/resume.md`
 
 Do not add personal names, employers, emails, or resume content here.
 
@@ -32,7 +31,6 @@ resuflow init [dir]
 resuflow [dir]
 resuflow --browser [dir]
 resuflow serve [dir]
-resuflow build [dir]
 ```
 
 The server binds to `127.0.0.1` only and reads/writes the workspace directory. The desktop window and the browser can use the same server at the same time.
@@ -75,6 +73,6 @@ Do not invent employers, dates, metrics, technologies, credentials, or outcomes.
 - Website download packages come from the Desktop downloads GitHub Actions workflow
 - Tagged Windows and Linux builds publish a GitHub Release, and the app checks that public release feed for newer-version notifications
 - Release tags and npm/Tauri/Cargo/PKGBUILD/.SRCINFO versions must match; use `npm run version:set -- <semver>`
-- Creating, editing, previewing, and exporting a resume works without touching app source
-- PDFs print cleanly to A4
+- Creating, editing, previewing, and printing a resume to A4 PDF works without touching app source
+- Resumes print cleanly to A4 via the rendered `/preview/:slug` stylesheet
 - No user data is committed to this repository

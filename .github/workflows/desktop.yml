@@ -6,9 +6,6 @@ on:
     tags:
       - 'v*'
 
-env:
-  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
-
 jobs:
   build-windows:
     name: Windows installer
@@ -40,7 +37,6 @@ jobs:
           else
             npm run version:check
           fi
-      - run: npm run desktop:prepare
 
       - name: Prepare optional Windows code signing
         id: windows_signing
@@ -214,8 +210,6 @@ jobs:
 
           test -x /usr/bin/resuflow
           test -L /usr/bin/resuflow-cli
-          test -f /usr/lib/resuflow/app/bin/resuflow.mjs
-          test -f /usr/lib/resuflow/runtime/node
           test -f /usr/share/licenses/resuflow/LICENSE
           desktop-file-validate /usr/share/applications/resuflow.desktop
 
@@ -234,7 +228,7 @@ jobs:
             sleep 1
           done
           if [[ "$healthy" -ne 1 ]]; then
-            echo 'The packaged Node sidecar did not serve the local API.' >&2
+            echo 'The packaged resuflow binary did not serve the local API.' >&2
             exit 1
           fi
 

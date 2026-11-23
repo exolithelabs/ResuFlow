@@ -24,7 +24,6 @@ pkgbase = resuflow
 	depends = pango
 	depends = webkit2gtk-4.1
 	depends = xdg-utils
-	optdepends = chromium: PDF export without the first-run Playwright download
 	options = !strip
 	source = resuflow-0.1.1.tar.gz::https://github.com/exolithelabs/resuflow/releases/download/v0.1.1/resuflow-0.1.1.tar.gz
 	source = resuflow-0.1.1-npm-cache.tar.gz::https://github.com/exolithelabs/resuflow/releases/download/v0.1.1/resuflow-0.1.1-npm-cache.tar.gz

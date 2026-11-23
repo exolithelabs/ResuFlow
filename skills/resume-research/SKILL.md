@@ -8,7 +8,7 @@ Build an evidence pack before writing a role-specific resume.
 
 - Target role or job description, when available
 - Existing resume variants in the user's workspace (`resumes/`)
-- The user's `profile.json` and any materials they provide (portfolio, writeups, repos)
+- The user's `profile.md` and any materials they provide (portfolio, writeups, repos)
 - Repository or document context the user explicitly makes available
 
 ## Process

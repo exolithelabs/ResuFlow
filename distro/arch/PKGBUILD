@@ -5,7 +5,7 @@
 # npm and Cargo caches as GitHub Release assets. Those archives feed `source=`
 # below, so build() and package() stay fully offline and every builder produces
 # byte-identical output for the same tag. Per-package GPG signatures are not
-# used; verify the published .sha256 sidecars and the GitHub build-provenance
+# used; verify the published .sha256 checksums and the GitHub build-provenance
 # attestation on the release instead.
 pkgname=resuflow
 pkgver=0.1.1
@@ -16,12 +16,11 @@ url='https://github.com/exolithelabs/resuflow'
 license=('Apache-2.0')
 depends=('cairo' 'desktop-file-utils' 'gdk-pixbuf2' 'glib2' 'gtk3' 'hicolor-icon-theme' 'libsoup3' 'pango' 'webkit2gtk-4.1' 'xdg-utils')
 makedepends=('cargo' 'librsvg' 'nodejs' 'npm' 'patchelf')
-optdepends=('chromium: PDF export without the first-run Playwright download')
 options=('!strip')
 source=("resuflow-${pkgver}.tar.gz::https://github.com/exolithelabs/resuflow/releases/download/v${pkgver}/resuflow-${pkgver}.tar.gz"
         "resuflow-${pkgver}-npm-cache.tar.gz::https://github.com/exolithelabs/resuflow/releases/download/v${pkgver}/resuflow-${pkgver}-npm-cache.tar.gz"
         "resuflow-${pkgver}-cargo-cache.tar.gz::https://github.com/exolithelabs/resuflow/releases/download/v${pkgver}/resuflow-${pkgver}-cargo-cache.tar.gz")
-# Release tarballs are verified through their published .sha256 sidecars and
+# Release tarballs are verified through their published .sha256 checksums and
 # the release-wide build-provenance attestation instead of pinned sums here.
 # distro/linux/build-arch-package.sh replaces these SKIP entries with the real
 # digests of the tarballs it just created, so makepkg still verifies every
@@ -46,25 +45,20 @@ build() {
   export NPM_CONFIG_CACHE="${srcdir}/vendor/npm-cache"
   export NPM_CONFIG_OFFLINE=true
 
-  # Stage the Node sidecar (app sources plus a bundled Node runtime) and then
-  # compile the Tauri desktop shell against it.
-  npm run desktop:prepare
+  # Build the TypeScript + Vite frontend into dist/ and compile the self-contained
+  # Rust + Tauri desktop/CLI binary with the frontend embedded.
+  npm ci --offline --ignore-scripts
+  npm run build
   cargo build --release --locked --offline --manifest-path src-tauri/Cargo.toml
 }
 
 package() {
   cd "${srcdir}/${pkgname}-${pkgver}"
 
-  # Desktop binary and the CLI-compatible alias. /usr/bin is already on PATH,
-  # so no profile scripts or post-install hooks are needed.
+  # Self-contained Rust binary and the CLI-compatible alias. /usr/bin is already
+  # on PATH, so no profile scripts, external runtimes, or post-install hooks are needed.
   install -Dm755 "src-tauri/target/release/${pkgname}" "${pkgdir}/usr/bin/${pkgname}"
   ln -s "${pkgname}" "${pkgdir}/usr/bin/${pkgname}-cli"
-
-  # Tauri resolves its resource directory to /usr/lib/<exe> on Linux, so the
-  # staged sidecar lands exactly where the shell looks for it.
-  install -dm755 "${pkgdir}/usr/lib/${pkgname}"
-  cp -a src-tauri/resources/app "${pkgdir}/usr/lib/${pkgname}/app"
-  cp -a src-tauri/resources/runtime "${pkgdir}/usr/lib/${pkgname}/runtime"
 
   install -Dm644 distro/linux/resuflow.desktop "${pkgdir}/usr/share/applications/resuflow.desktop"
   install -Dm644 distro/linux/io.github.exolithelabs.ResuFlow.metainfo.xml "${pkgdir}/usr/share/metainfo/io.github.exolithelabs.ResuFlow.metainfo.xml"

@@ -17,16 +17,15 @@ Install Node.js 20+, Rust stable, and the Tauri prerequisites for your operating
 
 ```bash
 npm ci
-npm test
-npm run version:check
-cargo test --manifest-path src-tauri/Cargo.toml
+npm run build
+npm run check
 ```
 
 Create test workspaces outside the source checkout:
 
 ```bash
-node bin/resuflow.mjs init ../resuflow-test-workspace
-node bin/resuflow.mjs --browser --dir ../resuflow-test-workspace
+cargo run --manifest-path src-tauri/Cargo.toml -- init ../resuflow-test-workspace
+cargo run --manifest-path src-tauri/Cargo.toml -- --browser --dir ../resuflow-test-workspace
 ```
 
 You are welcome to fork the Apache-2.0-licensed project and modify your fork for your own needs. The development instructions above are provided for that purpose.

@@ -6,12 +6,12 @@
 # works on any Arch machine. The script installs the dependencies the PKGBUILD
 # declares, verifies the release version, primes the vendored npm and Cargo
 # caches that the package builds offline from, publishes those tarballs (the
-# PKGBUILD input tarballs) with SHA-256 sidecars, and then hands the PKGBUILD to
+# PKGBUILD input tarballs) with SHA-256 checksums, and then hands the PKGBUILD to
 # makepkg so CI and a manual `makepkg -s` produce the same package.
 #
 # Layout follows the Filesystem Hierarchy Standard: /usr/bin/resuflow plus a
-# resuflow-cli alias, and the Node sidecar under /usr/lib/resuflow where the
-# Tauri shell resolves its resource directory. No install scripts or hooks.
+# resuflow-cli alias, desktop entry, AppStream metainfo, icons, and licenses.
+# No install scripts or hooks.
 #
 # Environment:
 #   GITHUB_REF_NAME  release tag (vX.Y.Z) when publishing; otherwise the
@@ -89,7 +89,7 @@ export NPM_CONFIG_CACHE="$NPM_CACHE"
 export CARGO_HOME="$CARGO_HOME_DIR"
 
 echo 'Priming the npm cache…'
-npm ci --omit=dev --ignore-scripts
+npm ci --ignore-scripts
 echo 'Priming the Cargo cache…'
 cargo fetch --locked --manifest-path src-tauri/Cargo.toml
 
