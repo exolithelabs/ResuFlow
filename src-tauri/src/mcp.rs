@@ -1,377 +1,251 @@
-use crate::memory::{append_memory, load_memory, save_memory};
-use crate::releases::CURRENT_VERSION;
-use crate::skills_store::{create_skill, delete_skill, list_skills, load_skill, save_skill};
-use crate::workspace::{
-    create_resume, list_resumes, load_profile, load_resume, save_profile, save_resume,
-    WorkspaceError,
-};
-use serde_json::{json, Value};
-use std::path::Path;
+//! Model Context Protocol server over stdio (newline-delimited JSON-RPC 2.0).
+//!
+//! Agents launch `resuflow mcp` as a subprocess. There is no network listener, port or
+//! token: the agent can reach exactly what its own process can, and nothing else can reach it.
+//!
+//! Tools mirror the app's actions one-to-one. Skills in the workspace are also exposed
+//! as MCP prompts.
 
-pub fn mcp_snippet(url: &str, token: &str) -> Value {
-    json!({
-        "url": url,
-        "config": {
-            "mcpServers": {
-                "resuflow": {
-                    "url": url,
-                    "headers": {
-                        "Authorization": format!("Bearer {token}"),
+use crate::config;
+use crate::workspace::{Note, Workspace, STATUSES};
+use serde_json::{json, Value};
+use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
+
+const SUPPORTED: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
+const INSTRUCTIONS: &str = "ResuFlow keeps the user's resumes as Markdown files in a local workspace. \
+Start with get_workspace: it returns the profile, memory, resume list and available skills. \
+profile.md holds identity/contact (front matter, printed in every resume header) and private career notes (body, never printed): \
+mine it for facts, never invent experience or metrics. Each resume is resumes/<slug>/resume.md with front matter \
+(title, status, tags, optional headline/links overrides) and a Markdown body using ## sections, ### Role — Company, and - bullets. \
+Prefer edit_resume for targeted changes and pass the expected_hash you got from a read, so you never overwrite the user's \
+concurrent edits in the desktop app. Run check_resume after editing. Record lasting preferences and target-role briefs with \
+append_memory. Load a skill with read_skill (or the matching prompt) before resume research, bullet writing, ATS passes or critiques.";
+
+pub fn serve(dir: Option<PathBuf>) -> io::Result<()> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout().lock();
+    let mut server = Server { dir };
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let reply = match serde_json::from_str::<Value>(&line) {
+            Ok(Value::Array(batch)) => {
+                let out: Vec<Value> = batch.iter().filter_map(|m| server.handle(m)).collect();
+                (!out.is_empty()).then(|| Value::Array(out))
+            }
+            Ok(msg) => server.handle(&msg),
+            Err(e) => Some(error(Value::Null, -32700, &format!("parse error: {e}"))),
+        };
+        if let Some(r) = reply {
+            serde_json::to_writer(&mut stdout, &r)?;
+            stdout.write_all(b"\n")?;
+            stdout.flush()?;
+        }
+    }
+    Ok(())
+}
+
+struct Server {
+    dir: Option<PathBuf>,
+}
+
+impl Server {
+    fn workspace(&self) -> Result<Workspace, String> {
+        config::workspace(self.dir.clone()).map_err(|e| e.0)
+    }
+
+    fn handle(&mut self, msg: &Value) -> Option<Value> {
+        let method = msg.get("method")?.as_str()?;
+        let id = msg.get("id").cloned();
+        let params = msg.get("params").cloned().unwrap_or(json!({}));
+        let id = id?; // notifications (no id) get no reply
+
+        let result = match method {
+            "initialize" => {
+                let asked = params["protocolVersion"].as_str().unwrap_or(SUPPORTED[0]);
+                let version = if SUPPORTED.contains(&asked) { asked } else { SUPPORTED[0] };
+                Ok(json!({
+                    "protocolVersion": version,
+                    "capabilities": { "tools": {}, "prompts": {} },
+                    "serverInfo": { "name": "resuflow", "title": "ResuFlow", "version": env!("CARGO_PKG_VERSION") },
+                    "instructions": INSTRUCTIONS,
+                }))
+            }
+            "ping" => Ok(json!({})),
+            "tools/list" => Ok(json!({ "tools": tools() })),
+            "tools/call" => {
+                let name = params["name"].as_str().unwrap_or_default();
+                let args = params.get("arguments").cloned().unwrap_or(json!({}));
+                Ok(match self.call(name, &args) {
+                    Ok(v) => {
+                        let text = match &v {
+                            Value::String(s) => s.clone(),
+                            other => serde_json::to_string_pretty(other).unwrap_or_default(),
+                        };
+                        let mut r = json!({ "content": [{ "type": "text", "text": text }], "isError": false });
+                        if v.is_object() {
+                            r["structuredContent"] = v;
+                        }
+                        r
                     }
+                    Err(e) => json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
+                })
+            }
+            "prompts/list" => self.prompts_list(),
+            "prompts/get" => self.prompts_get(&params),
+            "resources/list" => Ok(json!({ "resources": [] })),
+            "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
+            _ => Err((-32601, format!("method not found: {method}"))),
+        };
+        Some(match result {
+            Ok(r) => json!({ "jsonrpc": "2.0", "id": id, "result": r }),
+            Err((code, m)) => error(id, code, &m),
+        })
+    }
+
+    fn call(&self, name: &str, a: &Value) -> Result<Value, String> {
+        let ws = self.workspace()?;
+        let s = |k: &str| a.get(k).and_then(Value::as_str);
+        let req = |k: &str| s(k).ok_or_else(|| format!("missing required argument `{k}`"));
+        let hash = s("expected_hash");
+        let tags = |k: &str| {
+            a.get(k).and_then(Value::as_array).map(|v| {
+                v.iter().filter_map(Value::as_str).map(str::to_string).collect::<Vec<_>>()
+            })
+        };
+
+        match name {
+            "get_workspace" => {
+                let profile = ws.profile();
+                Ok(json!({
+                    "root": ws.root,
+                    "profile": {
+                        "name": profile.str("name"),
+                        "headline": profile.str("headline"),
+                        "notes_words": profile.body.split_whitespace().count(),
+                    },
+                    "resumes": j(ws.list_resumes())?,
+                    "skills": crate::skills::list().into_iter().map(|s| json!({ "name": s.name, "description": s.description })).collect::<Vec<_>>(),
+                    "memory": ws.read_note(Note::Memory).map_err(|e| e.0)?.content,
+                    "statuses": STATUSES,
+                }))
+            }
+            "read_profile" => j(ws.read_note(Note::Profile)),
+            "update_profile" => j(ws.write_note(Note::Profile, req("content")?, hash)),
+            "append_memory" => j(ws.append_memory(req("text")?)),
+            "update_memory" => j(ws.write_note(Note::Memory, req("content")?, hash)),
+            "list_resumes" => {
+                let mut list = ws.list_resumes().map_err(|e| e.0)?;
+                if let Some(st) = s("status") {
+                    list.retain(|r| r.status == st);
+                }
+                if let Some(t) = s("tag") {
+                    list.retain(|r| r.tags.iter().any(|x| x.eq_ignore_ascii_case(t)));
+                }
+                Ok(json!({ "resumes": list }))
+            }
+            "read_resume" => j(ws.read_resume(req("slug")?)),
+            "create_resume" => j(ws.create_resume(
+                req("title")?,
+                s("slug"),
+                s("from"),
+                s("content"),
+                tags("tags").unwrap_or_default(),
+            )),
+            "write_resume" => j(ws.write_resume(req("slug")?, req("content")?, hash)),
+            "edit_resume" => j(ws.edit_resume(req("slug")?, req("old_text")?, a["new_text"].as_str().unwrap_or(""), hash)),
+            "set_resume_meta" => j(ws.set_meta(req("slug")?, s("title"), s("status"), tags("tags"))),
+            "delete_resume" => {
+                let moved = ws.delete_resume(req("slug")?).map_err(|e| e.0)?;
+                Ok(json!({ "moved_to": moved }))
+            }
+            "check_resume" => j(ws.check(req("slug")?)),
+            "render_resume" => {
+                let slug = req("slug")?;
+                let html = ws.render(slug).map_err(|e| e.0)?;
+                if a["save"].as_bool().unwrap_or(false) {
+                    let path = ws.root.join("resumes").join(slug).join("resume.html");
+                    std::fs::write(&path, &html).map_err(|e| e.to_string())?;
+                    Ok(json!({ "saved": path, "bytes": html.len() }))
+                } else {
+                    Ok(Value::String(html))
                 }
             }
+            "read_skill" => {
+                let name = req("name")?;
+                crate::skills::get(name).map(|s| Value::String(s.content)).ok_or_else(|| format!("no skill named '{name}'"))
+            }
+            _ => Err(format!("unknown tool: {name}")),
         }
+    }
+
+    fn prompts_list(&self) -> Result<Value, (i64, String)> {
+        let prompts: Vec<Value> = crate::skills::list()
+            .into_iter()
+            .map(|s| json!({
+                "name": s.name,
+                "description": s.description,
+                "arguments": [{ "name": "slug", "description": "Resume to apply it to (optional)", "required": false }],
+            }))
+            .collect();
+        Ok(json!({ "prompts": prompts }))
+    }
+
+    fn prompts_get(&self, p: &Value) -> Result<Value, (i64, String)> {
+        let name = p["name"].as_str().unwrap_or_default();
+        let skill = crate::skills::get(name).ok_or((-32602, format!("no prompt named '{name}'")))?;
+        let mut text = skill.content;
+        if let Some(slug) = p["arguments"]["slug"].as_str().filter(|s| !s.is_empty()) {
+            text.push_str(&format!("\n\nApply this to the resume `{slug}` (read it with read_resume)."));
+        }
+        Ok(json!({
+            "description": name,
+            "messages": [{ "role": "user", "content": { "type": "text", "text": text } }],
+        }))
+    }
+}
+
+fn j<T: serde::Serialize>(v: crate::workspace::Result<T>) -> Result<Value, String> {
+    v.map_err(|e| e.0).map(|x| serde_json::to_value(x).unwrap_or(Value::Null))
+}
+
+fn error(id: Value, code: i64, message: &str) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+fn tool(name: &str, description: &str, props: Value, required: &[&str], read_only: bool) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": { "type": "object", "properties": props, "required": required, "additionalProperties": false },
+        "annotations": { "readOnlyHint": read_only, "destructiveHint": false, "openWorldHint": false },
     })
 }
 
-/// Handles a JSON-RPC 2.0 MCP request over Streamable HTTP.
-/// Returns `Ok(Some(json))` for requests with an `id`, or `Ok(None)` for notifications.
-pub fn handle_mcp_payload(body: &Value, workspace_root: &Path) -> Result<Option<Value>, WorkspaceError> {
-    if let Some(arr) = body.as_array() {
-        let mut responses = Vec::new();
-        for item in arr {
-            if let Some(resp) = handle_single_rpc(item, workspace_root) {
-                responses.push(resp);
-            }
-        }
-        if responses.is_empty() {
-            return Ok(None);
-        }
-        return Ok(Some(Value::Array(responses)));
-    }
-    Ok(handle_single_rpc(body, workspace_root))
-}
-
-fn handle_single_rpc(req: &Value, workspace_root: &Path) -> Option<Value> {
-    let id = req.get("id").cloned();
-    let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
-    let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
-
-    if method.starts_with("notifications/") || id.is_none() {
-        return None;
-    }
-    let id = id.unwrap_or(Value::Null);
-
-    match dispatch_method(method, &params, workspace_root) {
-        Ok(result) => Some(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": result,
-        })),
-        Err((code, message)) => Some(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {
-                "code": code,
-                "message": message,
-            }
-        })),
-    }
-}
-
-fn dispatch_method(
-    method: &str,
-    params: &Value,
-    workspace_root: &Path,
-) -> Result<Value, (i64, String)> {
-    match method {
-        "initialize" => Ok(json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {
-                "tools": {},
-                "prompts": {},
-            },
-            "serverInfo": {
-                "name": "resuflow",
-                "version": CURRENT_VERSION,
-            }
-        })),
-        "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({
-            "tools": tool_definitions(),
-        })),
-        "tools/call" => {
-            let name = params
-                .get("name")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| (-32602, "Missing tool name".to_string()))?;
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            match call_tool(name, &args, workspace_root) {
-                Ok(output) => Ok(text_content(&output, false)),
-                Err(err) => Ok(text_content(&json!({ "error": err.message }), true)),
-            }
-        }
-        "prompts/list" => Ok(json!({
-            "prompts": [{
-                "name": "draft_resume",
-                "description": "Draft or improve a role-specific resume using workspace files.",
-                "arguments": [
-                    { "name": "slug", "description": "Resume slug to edit", "required": true },
-                    { "name": "role", "description": "Target role", "required": false }
-                ]
-            }]
-        })),
-        "prompts/get" => {
-            let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            if name != "draft_resume" {
-                return Err((-32602, format!("Unknown prompt: {name}")));
-            }
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            let slug = args.get("slug").and_then(|v| v.as_str()).unwrap_or("");
-            let role = args
-                .get("role")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or("the target role");
-            Ok(json!({
-                "messages": [{
-                    "role": "user",
-                    "content": {
-                        "type": "text",
-                        "text": format!("Use the resuflow MCP tools. Read profile, memory, skills, and resume \"{slug}\". Improve that resume for {role} without inventing employers, dates, or metrics.")
-                    }
-                }]
-            }))
-        }
-        _ => Err((-32601, format!("Method not found: {method}"))),
-    }
-}
-
-fn text_content(value: &Value, is_error: bool) -> Value {
-    let text = if let Some(s) = value.as_str() {
-        s.to_string()
-    } else {
-        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-    };
-    let mut obj = json!({
-        "content": [{
-            "type": "text",
-            "text": text,
-        }]
-    });
-    if is_error {
-        obj["isError"] = json!(true);
-    }
-    obj
-}
-
-fn call_tool(name: &str, args: &Value, workspace_root: &Path) -> Result<Value, WorkspaceError> {
-    let req_str = |key: &str| -> Result<String, WorkspaceError> {
-        args.get(key)
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| WorkspaceError::bad_request(format!("Missing required argument: {key}")))
-    };
-
-    match name {
-        "list_resumes" => {
-            let resumes = list_resumes(workspace_root)?;
-            Ok(serde_json::to_value(resumes).unwrap_or_else(|_| json!([])))
-        }
-        "get_resume" => {
-            let slug = req_str("slug")?;
-            let resume = load_resume(workspace_root, &slug)?;
-            Ok(serde_json::to_value(resume).unwrap_or_else(|_| json!({})))
-        }
-        "write_resume" => {
-            let slug = req_str("slug")?;
-            let markdown = req_str("markdown")?;
-            let saved = save_resume(workspace_root, &slug, &json!({ "markdown": markdown }))?;
-            Ok(serde_json::to_value(saved).unwrap_or_else(|_| json!({})))
-        }
-        "create_resume" => {
-            let title = req_str("title")?;
-            let created = create_resume(workspace_root, &json!({ "title": title }))?;
-            Ok(serde_json::to_value(created).unwrap_or_else(|_| json!({})))
-        }
-        "get_profile" => {
-            let profile = load_profile(workspace_root)?;
-            Ok(serde_json::to_value(profile).unwrap_or_else(|_| json!({})))
-        }
-        "write_profile" => {
-            let markdown = req_str("markdown")?;
-            let saved = save_profile(workspace_root, &json!({ "markdown": markdown }))?;
-            Ok(serde_json::to_value(saved).unwrap_or_else(|_| json!({})))
-        }
-        "list_skills" => {
-            let skills = list_skills(workspace_root, false)?;
-            let summary: Vec<Value> = skills
-                .into_iter()
-                .map(|s| {
-                    json!({
-                        "slug": s.slug,
-                        "name": s.name,
-                        "description": s.description,
-                        "source": s.source,
-                        "enabled": s.enabled,
-                    })
-                })
-                .collect();
-            Ok(Value::Array(summary))
-        }
-        "get_skill" => {
-            let slug = req_str("slug")?;
-            let skill = load_skill(workspace_root, &slug)?;
-            Ok(serde_json::to_value(skill).unwrap_or_else(|_| json!({})))
-        }
-        "create_skill" => {
-            let skill_name = req_str("name")?;
-            let markdown = args.get("markdown").and_then(|v| v.as_str()).unwrap_or("");
-            let created = create_skill(
-                workspace_root,
-                &json!({ "name": skill_name, "markdown": markdown }),
-            )?;
-            Ok(serde_json::to_value(created).unwrap_or_else(|_| json!({})))
-        }
-        "write_skill" => {
-            let slug = req_str("slug")?;
-            let markdown = req_str("markdown")?;
-            let saved = save_skill(workspace_root, &slug, &json!({ "markdown": markdown }))?;
-            Ok(serde_json::to_value(saved).unwrap_or_else(|_| json!({})))
-        }
-        "delete_skill" => {
-            let slug = req_str("slug")?;
-            delete_skill(workspace_root, &slug)?;
-            Ok(json!({ "ok": true, "slug": slug }))
-        }
-        "get_memory" => {
-            let mem = load_memory(workspace_root)?;
-            Ok(serde_json::to_value(mem).unwrap_or_else(|_| json!({})))
-        }
-        "write_memory" => {
-            let markdown = req_str("markdown")?;
-            let saved = save_memory(workspace_root, &json!({ "markdown": markdown }))?;
-            Ok(serde_json::to_value(saved).unwrap_or_else(|_| json!({})))
-        }
-        "append_memory" => {
-            let note = req_str("note")?;
-            let saved = append_memory(workspace_root, &note)?;
-            Ok(serde_json::to_value(saved).unwrap_or_else(|_| json!({})))
-        }
-        _ => Err(WorkspaceError::bad_request(format!("Unknown tool: {name}"))),
-    }
-}
-
-fn tool_definitions() -> Value {
-    json!([
-        {
-            "name": "list_resumes",
-            "description": "List resumes in the local workspace.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "get_resume",
-            "description": "Read a resume Markdown file by slug.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "slug": { "type": "string", "description": "Resume slug" } },
-                "required": ["slug"]
-            }
-        },
-        {
-            "name": "write_resume",
-            "description": "Overwrite a resume Markdown file. Include YAML frontmatter.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "slug": { "type": "string" },
-                    "markdown": { "type": "string" }
-                },
-                "required": ["slug", "markdown"]
-            }
-        },
-        {
-            "name": "create_resume",
-            "description": "Create a new resume from a title.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "title": { "type": "string" } },
-                "required": ["title"]
-            }
-        },
-        {
-            "name": "get_profile",
-            "description": "Read shared profile Markdown.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "write_profile",
-            "description": "Overwrite shared profile Markdown.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "markdown": { "type": "string" } },
-                "required": ["markdown"]
-            }
-        },
-        {
-            "name": "list_skills",
-            "description": "List enabled built-in and user skills.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "get_skill",
-            "description": "Read a skill by slug.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "slug": { "type": "string" } },
-                "required": ["slug"]
-            }
-        },
-        {
-            "name": "create_skill",
-            "description": "Create a custom user skill.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" },
-                    "markdown": { "type": "string" }
-                },
-                "required": ["name"]
-            }
-        },
-        {
-            "name": "write_skill",
-            "description": "Update a custom skill Markdown file. Built-in skills cannot be edited.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "slug": { "type": "string" },
-                    "markdown": { "type": "string" }
-                },
-                "required": ["slug", "markdown"]
-            }
-        },
-        {
-            "name": "delete_skill",
-            "description": "Delete a custom skill. Built-in skills cannot be deleted.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "slug": { "type": "string" } },
-                "required": ["slug"]
-            }
-        },
-        {
-            "name": "get_memory",
-            "description": "Read durable memory notes.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "write_memory",
-            "description": "Replace memory Markdown.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "markdown": { "type": "string" } },
-                "required": ["markdown"]
-            }
-        },
-        {
-            "name": "append_memory",
-            "description": "Append a dated note to memory.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "note": { "type": "string" } },
-                "required": ["note"]
-            }
-        }
-    ])
+fn tools() -> Vec<Value> {
+    let slug = json!({ "type": "string", "description": "Resume slug, e.g. backend-acme" });
+    let hash = json!({ "type": "string", "description": "Hash from your last read. If the file changed since, the write is refused instead of overwriting." });
+    let tags = json!({ "type": "array", "items": { "type": "string" } });
+    let status = json!({ "type": "string", "enum": STATUSES });
+    vec![
+        tool("get_workspace", "Overview: workspace path, profile name and headline, all resumes, skills, full memory. Call first.", json!({}), &[], true),
+        tool("read_profile", "Read profile.md: front matter (name, headline, email, phone, location, links) is the printed header; the body is private career notes to draw facts from.", json!({}), &[], true),
+        tool("update_profile", "Replace profile.md entirely.", json!({ "content": { "type": "string" }, "expected_hash": hash }), &["content"], false),
+        tool("append_memory", "Append a note to memory.md: preferences, decisions, target-role briefs worth keeping across sessions.", json!({ "text": { "type": "string" } }), &["text"], false),
+        tool("update_memory", "Replace memory.md entirely (to reorganise or prune it).", json!({ "content": { "type": "string" }, "expected_hash": hash }), &["content"], false),
+        tool("list_resumes", "List resumes (newest first), optionally filtered.", json!({ "status": status, "tag": { "type": "string" } }), &[], true),
+        tool("read_resume", "Read a resume's full Markdown source, metadata and hash.", json!({ "slug": slug }), &["slug"], true),
+        tool("create_resume", "Create a resume. Use `from` to copy an existing resume (the usual way to tailor a variant), or `content` for full Markdown. Slug is derived from title if omitted.", json!({ "title": { "type": "string" }, "slug": slug, "from": { "type": "string", "description": "Slug to copy" }, "content": { "type": "string" }, "tags": tags }), &["title"], false),
+        tool("write_resume", "Replace a resume's full source (front matter + body). Prefer edit_resume for partial changes.", json!({ "slug": slug, "content": { "type": "string" }, "expected_hash": hash }), &["slug", "content"], false),
+        tool("edit_resume", "Replace one exact, unique occurrence of old_text with new_text in a resume's source.", json!({ "slug": slug, "old_text": { "type": "string" }, "new_text": { "type": "string" }, "expected_hash": hash }), &["slug", "old_text", "new_text"], false),
+        tool("set_resume_meta", "Change a resume's title, status or tags.", json!({ "slug": slug, "title": { "type": "string" }, "status": status, "tags": tags }), &["slug"], false),
+        tool("delete_resume", "Move a resume to the workspace's .trash folder (recoverable).", json!({ "slug": slug }), &["slug"], false),
+        tool("check_resume", "Deterministic checks: missing contact, ATS-hostile tables or images, weak openers, unquantified or overlong bullets, leftovers, length. Line numbers refer to resume.md.", json!({ "slug": slug }), &["slug"], true),
+        tool("render_resume", "Render a resume to print-ready A4 HTML, exactly what the app prints. With save=true, writes resumes/<slug>/resume.html and returns the path.", json!({ "slug": slug, "save": { "type": "boolean" } }), &["slug"], false),
+        tool("read_skill", "Load one of ResuFlow's built-in writing skills (role-research, impact-bullets, ats-pass, recruiter-review).", json!({ "name": { "type": "string" } }), &["name"], true),
+    ]
 }

@@ -1,78 +1,148 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ResuFlow</title>
-  <link rel="stylesheet" href="./styles.css" />
-</head>
-<body>
-  <header class="topbar">
-    <a class="brand" href="#/">ResuFlow</a>
-    <a class="back-home" id="back-home" href="#/" hidden>← All resumes</a>
-    <p id="save-status" class="save-status" hidden></p>
-    <div class="settings-menu">
-      <button type="button" class="settings-btn" id="settings-btn" aria-haspopup="true" aria-expanded="false" aria-label="Settings">
-        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="3"></circle>
-          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-        </svg>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ResuFlow</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <aside id="sidebar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"></span>
+        <span>ResuFlow</span>
+      </div>
+
+      <div class="section-head">
+        <span>Resumes</span>
+        <button id="new-resume" class="icon-btn" title="New resume (Ctrl+N)">+</button>
+      </div>
+      <input id="filter" class="filter" placeholder="Filter by title or tag" />
+      <nav id="resume-list" class="list"></nav>
+
+      <button id="open-hub" class="hub-btn" title="What your AI agent works with: profile, memory, skills, connection">
+        <span class="hub-icon" aria-hidden="true">✦</span>
+        <span class="hub-text">
+          <span>Agent</span>
+          <small>Profile · Memory · Skills · Connect</small>
+        </span>
       </button>
-      <nav class="settings-dropdown" id="settings-dropdown" hidden>
-        <a href="#/vault">Vault</a>
-        <a href="#/profile">Profile</a>
-        <a href="#/skills">Skills</a>
-        <a href="#/memory">Memory</a>
-        <a href="#/docs">Read docs</a>
-        <button type="button" id="check-updates">Check for updates</button>
-        <button type="button" id="open-browser">Open in browser</button>
-      </nav>
-    </div>
-  </header>
+    </aside>
 
-  <aside class="release-notice" id="release-notice" role="status" hidden>
-    <div>
-      <strong id="release-title">A new ResuFlow release is available.</strong>
-      <span id="release-detail"></span>
-    </div>
-    <div class="release-actions">
-      <a class="secondary" id="release-link" href="#" target="_blank" rel="noreferrer">View release</a>
-      <button class="ghost" id="release-dismiss" type="button" aria-label="Dismiss update notification">Dismiss</button>
-    </div>
-  </aside>
+    <main id="main">
+      <header id="toolbar">
+        <input id="title" class="title-input" spellcheck="false" />
+        <select id="status" title="Status"></select>
+        <input id="tags" class="tags-input" placeholder="add tags, comma separated" spellcheck="false" />
+        <span class="spacer"></span>
+        <button id="print" class="btn ghost" title="Print (Ctrl+P)">Print</button>
+        <button id="save-pdf" class="btn primary" title="Save as PDF (Ctrl+Shift+S)">Save PDF</button>
+      </header>
 
-  <main id="app" class="app"></main>
+      <div id="banner" class="banner" hidden></div>
 
-  <dialog id="create-dialog" class="dialog">
-    <form id="create-form" method="dialog">
-      <h2>New resume</h2>
-      <p>Each resume is a role-specific variant. Shared contact details live in your profile.</p>
-      <label>
-        <span>Target role / title</span>
-        <input id="create-title" name="title" required placeholder="Technical Product Manager" />
-      </label>
-      <div class="dialog-actions">
-        <button type="button" class="ghost" id="create-cancel">Cancel</button>
-        <button type="submit" class="primary">Create</button>
+      <section id="page-scroll" class="page-scroll">
+        <article class="page">
+          <header id="resume-header" class="resume-header" title="From your profile. Click to edit."></header>
+          <div id="editor-host" class="doc"></div>
+        </article>
+      </section>
+
+      <details id="checks" class="checks">
+        <summary><span id="checks-summary">Checks</span></summary>
+        <ul id="findings"></ul>
+      </details>
+
+      <footer id="statusbar">
+        <span id="save-state"></span>
+        <span id="stats"></span>
+      </footer>
+
+      <div id="empty" class="empty" hidden>
+        <h2>No resume selected</h2>
+        <p>Create one, or ask your AI agent to. It can read your profile and write here directly.</p>
+        <button class="btn primary" id="empty-new">New resume</button>
       </div>
-    </form>
-  </dialog>
+    </main>
 
-  <dialog id="skill-dialog" class="dialog">
-    <form id="skill-form" method="dialog">
-      <h2>New skill</h2>
-      <p>Custom skills are Markdown instructions the agent can load.</p>
-      <label>
-        <span>Name</span>
-        <input id="skill-name" name="name" required placeholder="Cover letter tone" />
-      </label>
-      <div class="dialog-actions">
-        <button type="button" class="ghost" id="skill-cancel">Cancel</button>
-        <button type="submit" class="primary">Create</button>
+    <div id="row-menu" class="menu" role="menu" hidden>
+      <button id="row-delete" class="menu-item danger" role="menuitem">Delete…</button>
+    </div>
+
+    <dialog id="dlg-new">
+      <form method="dialog">
+        <h3>New resume</h3>
+        <label>Title<input name="title" required placeholder="e.g. Senior Backend Engineer, Acme" /></label>
+        <menu><button value="cancel" formnovalidate class="btn ghost">Cancel</button><button value="ok" class="btn primary">Create</button></menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-confirm">
+      <form method="dialog">
+        <h3 id="confirm-title"></h3>
+        <p id="confirm-text"></p>
+        <menu><button value="cancel" class="btn ghost">Cancel</button><button value="ok" class="btn primary danger">Move to trash</button></menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-hub" class="hub">
+      <div class="hub-layout">
+        <nav class="hub-nav">
+          <h3>Agent</h3>
+          <button class="hub-tab" data-tab="profile">Profile</button>
+          <button class="hub-tab" data-tab="memory">Memory</button>
+          <div class="hub-sub">Built-in skills</div>
+          <div id="hub-skills"></div>
+          <div class="hub-sub">Connection</div>
+          <button class="hub-tab" data-tab="connect">Connect an agent</button>
+        </nav>
+
+        <section class="hub-body">
+          <header class="hub-head">
+            <div>
+              <strong id="hub-title"></strong>
+              <p id="hub-desc"></p>
+            </div>
+            <span id="hub-save" class="hub-save"></span>
+            <button id="hub-close" class="icon-btn close" title="Close (Esc)">×</button>
+          </header>
+
+          <div class="hub-scroll">
+            <form id="hub-props" class="props" hidden autocomplete="off">
+              <label>Name<input name="name" /></label>
+              <label>Headline<input name="headline" /></label>
+              <label>Email<input name="email" type="email" /></label>
+              <label>Phone<input name="phone" /></label>
+              <label>Location<input name="location" /></label>
+              <label class="wide">Links<input name="links" placeholder="github.com/you, linkedin.com/in/you" /></label>
+              <p class="props-note">These print as the header of every resume.</p>
+            </form>
+
+            <div id="hub-skill-bar" class="skill-bar" hidden>
+              <span class="badge">Built in · read-only</span>
+              <span class="spacer"></span>
+              <button type="button" id="skill-copy" class="btn ghost">Copy</button>
+              <button type="button" class="btn ghost" data-install="claude" title="Copies all skills to ~/.claude/skills">Install in Claude Code</button>
+              <button type="button" class="btn ghost" data-install="agents" title="Copies all skills to ~/.agents/skills (Codex and other agents)">Install in other agents</button>
+            </div>
+
+            <div id="hub-notes-label" class="notes-label" hidden>Career notes <span>private · never printed · your agent writes from these</span></div>
+            <div id="hub-editor-host" class="doc hub-doc"></div>
+
+            <div id="hub-connect" class="hub-connect" hidden>
+              <p>ResuFlow speaks MCP over stdio: your agent starts it as a local subprocess. There's no server, port or token, and nothing leaves this machine except what your agent sends to its own provider.</p>
+              <label>Claude Code</label>
+              <div class="copy-row"><code id="cc-cmd"></code><button type="button" class="btn ghost" data-copy="cc-cmd">Copy</button></div>
+              <label>Any MCP client (Claude Desktop, Cursor, Codex, Gemini CLI…)</label>
+              <div class="copy-row"><pre id="mcp-json"></pre><button type="button" class="btn ghost" data-copy="mcp-json">Copy</button></div>
+              <p class="hint">Once connected, your agent can use everything in this panel: your profile, memory and the built-in skills. It can also read and edit your resumes. To give it its own copy of the skills, open any skill and click Install.</p>
+              <p class="hint">Your data is stored in <code id="hub-root"></code></p>
+            </div>
+          </div>
+        </section>
       </div>
-    </form>
-  </dialog>
+    </dialog>
 
-  <script type="module" src="./main.ts"></script>
-</body>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
 </html>

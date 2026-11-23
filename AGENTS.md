@@ -1,78 +1,16 @@
-# AGENTS.md — ResuFlow
+# Working on ResuFlow
 
-This repository is the **ResuFlow product**: a Windows direct-download desktop app and an Arch Linux pacman package with CLI-compatible entrypoints. It is not a personal resume catalog. User profile and resume data live in a separate workspace.
-
-## Product model
-
-- `src-tauri/` is the self-contained Rust + Tauri backend, desktop shell, CLI (`resuflow`), workspace I/O, print-ready A4 Markdown renderer, HTTP API (`127.0.0.1`), and MCP server (`/mcp`). Shipping packages are a single Rust binary with zero Node.js runtime.
-- `web/` is the TypeScript + Vite frontend (`web/main.ts`, `web/api.ts`, `web/types.ts`, `web/styles.css`, `web/index.html`), compiled into `dist/` and embedded directly into the Rust binary.
-- `distro/` is the Linux packaging source of truth: `distro/arch/PKGBUILD` plus generated `distro/arch/.SRCINFO` for pacman, the shared `resuflow.desktop` entry and AppStream metainfo under `distro/linux/`, and `distro/linux/build-arch-package.sh`, which builds the `.pkg.tar.zst` in CI.
-- The Windows installer and the Arch Linux package are produced in GitHub Actions (`.github/workflows/desktop.yml`), not locally. Windows releases are currently unsigned and include a SHA-256 checksum plus GitHub provenance attestation. Tagged releases publish the Arch package, its checksum, the PKGBUILD input tarballs, and build-provenance attestations as GitHub Release assets.
-- Windows packages are downloaded from the product website. Arch packages are downloaded from the latest GitHub release; manually rebuilding with the checked-in PKGBUILD is supported.
-- User data is **never** stored in this repo. It belongs in the workspace:
-  - `resuflow.json`
-  - `profile.md`
-  - `memory.md`
-  - `skills/<slug>/SKILL.md`
-  - `resumes/<slug>/resume.md`
-
-Do not add personal names, employers, emails, or resume content here.
-
-## Commands
-
-```bash
-# Install the Arch pacman package, or on Windows from the product website.
-# Arch flows (each also upgrades an existing install):
-#   sudo pacman -U <release-url.pkg.tar.zst>                       # direct URL
-#   curl -fsSLO <release-url.pkg.tar.zst>{,.sha256} && sudo pacman -U ./<file>.pkg.tar.zst
-#   # or browser "Save as…" into a folder, then from that folder:
-#   sudo pacman -U ./<file>.pkg.tar.zst                            # local file (full path works too)
-resuflow init [dir]
-resuflow [dir]
-resuflow --browser [dir]
-resuflow serve [dir]
-```
-
-The server binds to `127.0.0.1` only and reads/writes the workspace directory. The desktop window and the browser can use the same server at the same time.
-
-## Creating or changing resume content
-
-When helping a user write resume text (in their workspace, not this repo):
-
-1. `skills/resume-research/SKILL.md`
-2. `skills/impact-writer/SKILL.md`
-3. `skills/ats-optimizer/SKILL.md`
-4. `skills/resume-critic/SKILL.md`
-
-Do not invent employers, dates, metrics, technologies, credentials, or outcomes. If a claim is not supported by the user's workspace, public materials they point to, or explicit user input, mark it as needing verification.
-
-## Resume principles
-
-- Tailor each resume to a target role. Do not only swap the title.
-- Prefer specific evidence over generic adjectives.
-- Use numbers only when supported.
-- Surface AI/technical skills only when the user can defend them in an interview.
-- Keep output ATS-friendly: semantic HTML, standard section names, real text.
-
-## Quality bar for the app
-
-- End-user installs do not require Node.js or npm
-- Windows is distributed as an NSIS installer
-- The Windows installer adds its install directory to the current user's PATH and removes that entry on uninstall
-- Public Windows installers are currently unsigned, explicitly disclosed as such, and accompanied by a SHA-256 checksum and GitHub provenance attestation
-- Arch Linux is distributed only as the `resuflow` pacman package published on tagged GitHub releases; per-package GPG signatures are not used, so verify the published SHA-256 checksum and release attestation before installing
-- The Arch package installs `/usr/bin/resuflow` plus a `resuflow-cli` alias, desktop entry, icons, and licenses; `/usr/bin` is already on PATH, so no profile scripts or hooks are involved
-- CI builds the Arch package in an `archlinux:base` container, installs it in a clean container via both `pacman -U <url>` and `pacman -U <local file>` (including an upgrade pass), and blocks the release on failure
-- Uninstalling is `sudo pacman -Rns resuflow` on Arch (Windows Settings > Apps on Windows) and never removes resume workspaces
-- `npm run version:set -- <semver>` synchronizes npm, Tauri, Cargo, lockfiles, PKGBUILD, and .SRCINFO; `npm run distro:check` validates the Arch metadata
-- `init` creates a workspace outside this repo
-- First desktop launch creates a default workspace under Documents if none exists
-- Default app launch opens the Tauri desktop window
-- `--browser` still serves the same UI on localhost
-- While running, MCP is at `http://127.0.0.1:4173/mcp` for external agents and requires the per-process bearer token shown in the app
-- Website download packages come from the Desktop downloads GitHub Actions workflow
-- Tagged Windows and Linux builds publish a GitHub Release, and the app checks that public release feed for newer-version notifications
-- Release tags and npm/Tauri/Cargo/PKGBUILD/.SRCINFO versions must match; use `npm run version:set -- <semver>`
-- Creating, editing, previewing, and printing a resume to A4 PDF works without touching app source
-- Resumes print cleanly to A4 via the rendered `/preview/:slug` stylesheet
-- No user data is committed to this repository
+- One Rust core serves three front ends: the Tauri app (`app.rs`), the stdio MCP server (`mcp.rs`) and the CLI
+  (`main.rs`). Put behaviour in `workspace.rs`, `render.rs` or `lint.rs`, never in a front end, so all three
+  stay identical.
+- New user-facing actions need a `Workspace` method, a Tauri command, an MCP tool and, if it makes sense, a CLI
+  command.
+- Every write goes through `atomic_write` and accepts an `expected_hash`. Don't add write paths that skip the guard.
+- Names that become paths go through `check_slug`.
+- `stdout` in `mcp` mode carries JSON-RPC only. Log to stderr.
+- Built-in skills live in `skills/` and are compiled in via `skills.rs`. They are read-only at runtime; never
+  write them into the workspace.
+- Keep it small: no UI framework, no async runtime, no HTTP server. CodeMirror is the one big frontend
+  dependency (the live-preview editor). Justify any new dependency.
+- Never commit real resume data. Test against a temp folder: `--dir /tmp/rf-test` or `RESUFLOW_DIR=/tmp/rf-test`.
+- Before finishing: `npm run check`.

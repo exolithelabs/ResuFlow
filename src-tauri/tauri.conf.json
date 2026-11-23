@@ -1,39 +1,31 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "ResuFlow",
-  "version": "0.1.1",
-  "identifier": "io.github.exolithelabs.ResuFlow",
+  "version": "0.2.0",
+  "identifier": "dev.resuflow.app",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://127.0.0.1:5173",
+    "devUrl": "http://localhost:5173",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [],
+    "windows": [
+      {
+        "label": "main",
+        "title": "ResuFlow",
+        "width": 1320,
+        "height": 860,
+        "minWidth": 900,
+        "minHeight": 560
+      }
+    ],
     "security": {
-      "csp": "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'self'; frame-src 'self'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; frame-src preview: http://preview.localhost; connect-src ipc: http://ipc.localhost; img-src 'self' data:"
     }
   },
   "bundle": {
-    "active": true,
-    "category": "Productivity",
-    "shortDescription": "Build tailored, ATS-friendly resumes in a local workspace.",
-    "longDescription": "A local-first resume builder with Markdown editing, print-ready previews, and an MCP endpoint for external agents.",
-    "targets": [
-      "nsis"
-    ],
-    "windows": {
-      "nsis": {
-        "installMode": "currentUser",
-        "installerHooks": "./windows/installer-hooks.nsh"
-      }
-    },
-    "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.ico"
-    ]
+    "active": false,
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png", "icons/icon.ico"]
   }
 }

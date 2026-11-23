@@ -1,604 +1,624 @@
-use crate::markdown::{
-    excerpt, parse_frontmatter, serialize_profile_markdown, serialize_resume_markdown,
-    starter_markdown, starter_profile_markdown, ProfileInput,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+//! The workspace: a plain folder of Markdown files the user owns.
+//!
+//! ```text
+//! <workspace>/
+//!   resuflow.json          marker file
+//!   profile.md             shared identity + contact (front matter) and career notes (body)
+//!   memory.md              durable notes agents keep between sessions
+//!   resumes/<slug>/resume.md
+//!   .trash/                deleted resumes are moved here, never erased
+//! ```
+//!
+//! Skills are not stored here: they ship inside the app (see `skills.rs`).
+//!
+//! Every mutating call accepts an optional `expected_hash`. If the file changed since
+//! the caller read it, the write is refused with a conflict instead of clobbering an
+//! edit made by the desktop app or another agent.
+
+use crate::doc::{Doc, Value};
+use serde::Serialize;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use uuid::Uuid;
 
-pub const SCHEMA_VERSION: i64 = 1;
-pub const WORKSPACE_FILE: &str = "resuflow.json";
+pub const STATUSES: [&str; 4] = ["draft", "ready", "sent", "archived"];
 
-#[derive(Debug, Clone)]
-pub struct WorkspaceError {
-    pub message: String,
-    pub status: u16,
-}
+#[derive(Debug)]
+pub struct Error(pub String);
 
-impl WorkspaceError {
-    pub fn new(message: impl Into<String>, status: u16) -> Self {
-        Self {
-            message: message.into(),
-            status,
-        }
-    }
-
-    pub fn bad_request(message: impl Into<String>) -> Self {
-        Self::new(message, 400)
-    }
-
-    pub fn unauthorized(message: impl Into<String>) -> Self {
-        Self::new(message, 401)
-    }
-
-    pub fn forbidden(message: impl Into<String>) -> Self {
-        Self::new(message, 403)
-    }
-
-    pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new(message, 404)
-    }
-
-    pub fn conflict(message: impl Into<String>) -> Self {
-        Self::new(message, 409)
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
-impl fmt::Display for WorkspaceError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error(e.to_string())
     }
 }
 
-impl std::error::Error for WorkspaceError {}
+pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Profile {
-    pub name: String,
-    pub headline: String,
-    pub email: String,
-    pub phone: String,
-    pub location: String,
-    pub website: String,
-    pub linkedin: String,
-    pub github: String,
-    pub body: String,
-    pub markdown: String,
+macro_rules! bail {
+    ($($t:tt)*) => { return Err(Error(format!($($t)*))) };
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Resume {
-    pub slug: String,
-    pub title: String,
-    pub status: String,
-    pub tags: Vec<String>,
-    pub updated: String,
-    pub body: String,
-    pub markdown: String,
-    pub summary: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Serialize, Clone, Debug)]
 pub struct ResumeSummary {
     pub slug: String,
     pub title: String,
     pub status: String,
-    pub updated: String,
-    pub summary: String,
     pub tags: Vec<String>,
+    pub updated_ms: u64,
+    pub words: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Serialize, Clone, Debug)]
+pub struct ResumeFile {
+    #[serde(flatten)]
+    pub summary: ResumeSummary,
+    pub content: String,
+    pub hash: String,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct TextFile {
+    pub content: String,
+    pub hash: String,
+}
+
+/// A Markdown file split for editing: front matter fields and body edited separately.
+#[derive(Serialize, Clone, Debug)]
+pub struct Parts {
+    pub fields: serde_json::Map<String, serde_json::Value>,
+    pub body: String,
+    /// Lines in the file before the body starts (to map check line numbers onto the body).
+    pub body_offset: usize,
+    pub hash: String,
+}
+
+/// A file that can be read and written as `Parts`.
+#[derive(Clone, Debug)]
+pub enum Target {
+    Resume(String),
+    Note(Note),
+}
+#[derive(Clone, Copy, Debug)]
+pub enum Note {
+    Profile,
+    Memory,
+}
+
+impl Note {
+    fn file(self) -> &'static str {
+        match self {
+            Note::Profile => "profile.md",
+            Note::Memory => "memory.md",
+        }
+    }
+}
+
 pub struct Workspace {
     pub root: PathBuf,
-    pub marker: Value,
 }
 
-pub fn is_valid_slug(slug: &str) -> bool {
-    if slug.is_empty() || slug.starts_with('-') || slug.ends_with('-') || slug.contains("--") {
-        return false;
-    }
-    slug.bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-}
+const PROFILE_TEMPLATE: &str = "---
+name: Your Name
+headline: What you do, in one line
+email: you@example.com
+phone: \"+00 00000 00000\"
+location: City, Country
+links: [linkedin.com/in/you, github.com/you]
+---
 
-pub fn assert_slug(slug: &str, kind: &str) -> Result<(), WorkspaceError> {
-    if !is_valid_slug(slug) {
-        let display = if slug.is_empty() { "(empty)" } else { slug };
-        return Err(WorkspaceError::bad_request(format!(
-            "Invalid {kind} slug: {display}"
-        )));
-    }
-    Ok(())
-}
+# Career notes
 
-pub fn slugify(value: &str) -> String {
-    let mut out = String::new();
-    let mut prev_dash = false;
-    for ch in value.trim().to_ascii_lowercase().chars() {
-        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
-            out.push(ch);
-            prev_dash = false;
-        } else if !out.is_empty() && !prev_dash {
-            out.push('-');
-            prev_dash = true;
+The front matter above becomes the header of every resume.
+
+Everything below is private source material for writing resumes: roles, projects,
+metrics, wins, tools. It is never printed. Be generous here; resumes pick from it.
+";
+
+const MEMORY_TEMPLATE: &str = "# Memory
+
+Durable notes for AI agents working in this workspace: preferences, decisions,
+target roles, things to avoid. Agents append here; edit freely.
+";
+
+const RESUME_TEMPLATE: &str = "## Summary
+
+Two or three lines aimed at this role.
+
+## Experience
+
+### Role — Company
+*Start – End · Location*
+
+- Achievement with a measurable result.
+
+## Skills
+
+- Languages:
+- Tools:
+
+## Education
+
+### Degree — Institution
+*Year*
+";
+
+impl Workspace {
+    /// Open an existing folder as a workspace. Missing pieces are created lazily.
+    pub fn open(root: impl Into<PathBuf>) -> Result<Workspace> {
+        let root = root.into();
+        if !root.is_dir() {
+            bail!("workspace folder does not exist: {} (run `resuflow init` first)", root.display());
         }
+        let root = root.canonicalize()?;
+        Ok(Workspace { root })
     }
-    let trimmed = out.trim_matches('-');
-    trimmed.chars().take(80).collect::<String>().trim_end_matches('-').to_string()
-}
 
-pub fn current_date_ymd() -> (i32, u32, u32) {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let days = secs.div_euclid(86_400);
-    // Howard Hinnant's civil_from_days algorithm
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u32;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = (y + if m <= 2 { 1 } else { 0 }) as i32;
-    (year, m, d)
-}
-
-pub fn month_stamp() -> String {
-    let (year, month, _) = current_date_ymd();
-    format!("{year:04}-{month:02}")
-}
-
-pub fn date_stamp() -> String {
-    let (year, month, day) = current_date_ymd();
-    format!("{year:04}-{month:02}-{day:02}")
-}
-
-pub fn iso_timestamp() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (year, month, day) = current_date_ymd();
-    let rem = secs % 86_400;
-    let hour = rem / 3600;
-    let min = (rem % 3600) / 60;
-    let sec = rem % 60;
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
-}
-
-pub fn atomic_write_file(file_path: &Path, data: &str) -> Result<(), WorkspaceError> {
-    if let Some(parent) = file_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| WorkspaceError::new(format!("Failed to create directory: {e}"), 500))?;
+    /// Create (or complete) a workspace. Never overwrites existing files.
+    pub fn init(root: impl Into<PathBuf>) -> Result<Workspace> {
+        let root = root.into();
+        fs::create_dir_all(root.join("resumes"))?;
+        write_if_missing(&root.join("resuflow.json"), "{\n  \"app\": \"resuflow\",\n  \"format\": 2\n}\n")?;
+        write_if_missing(&root.join("profile.md"), PROFILE_TEMPLATE)?;
+        write_if_missing(&root.join("memory.md"), MEMORY_TEMPLATE)?;
+        Workspace::open(root)
     }
-    let file_name = file_path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file");
-    let pid = std::process::id();
-    let temp_name = format!(".{file_name}.{pid}.{}.tmp", Uuid::new_v4());
-    let temp_path = file_path.with_file_name(temp_name);
 
-    let write_res = (|| -> std::io::Result<()> {
-        let mut opts = OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
+    pub fn is_workspace(dir: &Path) -> bool {
+        dir.join("resuflow.json").is_file() || dir.join("resumes").is_dir()
+    }
+
+    // ---- resumes -------------------------------------------------------------
+
+    fn resume_path(&self, slug: &str) -> Result<PathBuf> {
+        check_slug(slug)?;
+        Ok(self.root.join("resumes").join(slug).join("resume.md"))
+    }
+
+    pub fn list_resumes(&self) -> Result<Vec<ResumeSummary>> {
+        let dir = self.root.join("resumes");
+        let mut out = Vec::new();
+        let Ok(entries) = fs::read_dir(&dir) else { return Ok(out) };
+        for e in entries.flatten() {
+            let slug = e.file_name().to_string_lossy().to_string();
+            if check_slug(&slug).is_err() {
+                continue;
+            }
+            let path = e.path().join("resume.md");
+            if let Ok(text) = fs::read_to_string(&path) {
+                out.push(summarize(&slug, &text, mtime_ms(&path)));
+            }
         }
-        let mut file: File = opts.open(&temp_path)?;
-        file.write_all(data.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temp_path, file_path)?;
-        Ok(())
-    })();
-
-    if let Err(err) = write_res {
-        let _ = fs::remove_file(&temp_path);
-        return Err(WorkspaceError::new(
-            format!("Failed to write file {}: {err}", file_path.display()),
-            500,
-        ));
-    }
-    Ok(())
-}
-
-pub fn find_workspace(start_dir: &Path) -> Result<Workspace, WorkspaceError> {
-    let dir = resolve_abs_path(start_dir);
-    let marker = dir.join(WORKSPACE_FILE);
-    let marker_text = match fs::read_to_string(&marker) {
-        Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(WorkspaceError::bad_request(format!(
-                "No resume workspace found in {}. Run `resuflow init` first.",
-                dir.display()
-            )));
-        }
-        Err(err) => {
-            return Err(WorkspaceError::new(
-                format!("Could not read {}: {err}", marker.display()),
-                500,
-            ));
-        }
-    };
-
-    let payload: Value = serde_json::from_str(&marker_text)
-        .map_err(|_| WorkspaceError::bad_request(format!("Invalid {WORKSPACE_FILE}: expected valid JSON.")))?;
-    let migrated = migrate_workspace_marker(&marker, payload)?;
-    Ok(Workspace {
-        root: dir,
-        marker: migrated,
-    })
-}
-
-pub fn init_workspace(target_dir: &Path) -> Result<Workspace, WorkspaceError> {
-    let root = resolve_abs_path(target_dir);
-    fs::create_dir_all(root.join("resumes"))
-        .map_err(|e| WorkspaceError::new(e.to_string(), 500))?;
-    fs::create_dir_all(root.join("skills"))
-        .map_err(|e| WorkspaceError::new(e.to_string(), 500))?;
-
-    let marker_path = root.join(WORKSPACE_FILE);
-    if !marker_path.exists() {
-        write_json(
-            &marker_path,
-            &json!({
-                "schemaVersion": SCHEMA_VERSION,
-                "created": iso_timestamp(),
-            }),
-        )?;
+        out.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms));
+        Ok(out)
     }
 
-    let profile_path = root.join("profile.md");
-    if !profile_path.exists() {
-        atomic_write_file(&profile_path, &starter_profile_markdown())?;
-    }
-
-    let readme_path = root.join("README.md");
-    if !readme_path.exists() {
-        atomic_write_file(&readme_path, DATA_REPO_README)?;
-    }
-
-    let gitignore_path = root.join(".gitignore");
-    if !gitignore_path.exists() {
-        atomic_write_file(&gitignore_path, "*.log\n.DS_Store\nThumbs.db\nsettings.json\n")?;
-    }
-
-    find_workspace(&root)
-}
-
-pub fn load_profile(root: &Path) -> Result<Profile, WorkspaceError> {
-    let md_file = root.join("profile.md");
-    if md_file.exists() {
-        let content = fs::read_to_string(&md_file)
-            .map_err(|e| WorkspaceError::new(e.to_string(), 500))?;
-        return Ok(markdown_to_profile(&content));
-    }
-
-    let profile = markdown_to_profile(&starter_profile_markdown());
-    atomic_write_file(&md_file, &profile.markdown)?;
-    Ok(profile)
-}
-
-pub fn save_profile(root: &Path, input: &Value) -> Result<Profile, WorkspaceError> {
-    let markdown = if let Some(md) = input.get("markdown").and_then(|v| v.as_str()) {
-        md.to_string()
-    } else {
-        serialize_profile_markdown(&ProfileInput {
-            name: input.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-            headline: input.get("headline").and_then(|v| v.as_str()).unwrap_or(""),
-            email: input.get("email").and_then(|v| v.as_str()).unwrap_or(""),
-            phone: input.get("phone").and_then(|v| v.as_str()).unwrap_or(""),
-            location: input.get("location").and_then(|v| v.as_str()).unwrap_or(""),
-            website: input.get("website").and_then(|v| v.as_str()).unwrap_or(""),
-            linkedin: input.get("linkedin").and_then(|v| v.as_str()).unwrap_or(""),
-            github: input.get("github").and_then(|v| v.as_str()).unwrap_or(""),
-            body: input.get("body").and_then(|v| v.as_str()).unwrap_or(""),
+    pub fn read_resume(&self, slug: &str) -> Result<ResumeFile> {
+        let path = self.resume_path(slug)?;
+        let content = fs::read_to_string(&path).map_err(|_| Error(format!("no resume named '{slug}'")))?;
+        Ok(ResumeFile {
+            summary: summarize(slug, &content, mtime_ms(&path)),
+            hash: hash(&content),
+            content,
         })
-    };
-    let next = markdown_to_profile(&markdown);
-    atomic_write_file(&root.join("profile.md"), &next.markdown)?;
-    Ok(next)
-}
+    }
 
-pub fn list_resumes(root: &Path) -> Result<Vec<ResumeSummary>, WorkspaceError> {
-    let resumes_dir = root.join("resumes");
-    fs::create_dir_all(&resumes_dir)
-        .map_err(|e| WorkspaceError::new(e.to_string(), 500))?;
-    let entries = fs::read_dir(&resumes_dir)
-        .map_err(|e| WorkspaceError::new(e.to_string(), 500))?;
-
-    let mut resumes = Vec::new();
-    for entry in entries.flatten() {
-        let Ok(ft) = entry.file_type() else { continue };
-        if !ft.is_dir() {
-            continue;
+    /// Create a resume. `from` copies another resume's content; `content` is used verbatim.
+    pub fn create_resume(
+        &self,
+        title: &str,
+        slug: Option<&str>,
+        from: Option<&str>,
+        content: Option<&str>,
+        tags: Vec<String>,
+    ) -> Result<ResumeFile> {
+        let title = title.trim();
+        if title.is_empty() {
+            bail!("title is required");
         }
-        let slug = entry.file_name().to_string_lossy().to_string();
-        if let Ok(resume) = load_resume(root, &slug) {
-            resumes.push(summarize_resume(&resume));
+        let slug = match slug {
+            Some(s) => s.to_string(),
+            None => self.unique_slug(&slugify(title)),
+        };
+        let path = self.resume_path(&slug)?;
+        if path.exists() {
+            bail!("a resume named '{slug}' already exists");
+        }
+        let mut doc = match (content, from) {
+            (Some(c), _) => Doc::parse(c),
+            (None, Some(src)) => Doc::parse(&self.read_resume(src)?.content),
+            (None, None) => Doc { meta: vec![], body: RESUME_TEMPLATE.to_string() },
+        };
+        doc.set("title", Value::Str(title.to_string()));
+        if from.is_some() {
+            doc.set("status", Value::Str(String::new())); // a copy starts over as a draft
+        }
+        if !tags.is_empty() {
+            doc.set("tags", Value::List(tags));
+        }
+        fs::create_dir_all(path.parent().unwrap())?;
+        atomic_write(&path, &doc.to_string())?;
+        self.read_resume(&slug)
+    }
+
+    pub fn write_resume(&self, slug: &str, content: &str, expected_hash: Option<&str>) -> Result<ResumeFile> {
+        let path = self.resume_path(slug)?;
+        if !path.exists() {
+            bail!("no resume named '{slug}' (use create_resume)");
+        }
+        guard(&path, expected_hash)?;
+        atomic_write(&path, content)?;
+        self.read_resume(slug)
+    }
+
+    /// Replace exactly one occurrence of `old` with `new` in the resume source.
+    pub fn edit_resume(&self, slug: &str, old: &str, new: &str, expected_hash: Option<&str>) -> Result<ResumeFile> {
+        let current = self.read_resume(slug)?;
+        if let Some(h) = expected_hash {
+            if h != current.hash {
+                bail!("conflict: resume '{slug}' changed since it was read (re-read and retry)");
+            }
+        }
+        if old.is_empty() {
+            bail!("old_text must not be empty");
+        }
+        match current.content.matches(old).count() {
+            0 => bail!("old_text not found in resume '{slug}'"),
+            1 => {}
+            n => bail!("old_text appears {n} times; include more surrounding text to make it unique"),
+        }
+        let updated = current.content.replacen(old, new, 1);
+        self.write_resume(slug, &updated, Some(&current.hash))
+    }
+
+    pub fn set_meta(
+        &self,
+        slug: &str,
+        title: Option<&str>,
+        status: Option<&str>,
+        tags: Option<Vec<String>>,
+    ) -> Result<ResumeFile> {
+        let current = self.read_resume(slug)?;
+        let mut doc = Doc::parse(&current.content);
+        if let Some(t) = title {
+            if t.trim().is_empty() {
+                bail!("title must not be empty");
+            }
+            doc.set("title", Value::Str(t.trim().into()));
+        }
+        if let Some(s) = status {
+            if !STATUSES.contains(&s) {
+                bail!("status must be one of: {}", STATUSES.join(", "));
+            }
+            doc.set("status", Value::Str(s.into()));
+        }
+        if let Some(t) = tags {
+            let t = t.into_iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+            doc.set("tags", Value::List(t));
+        }
+        self.write_resume(slug, &doc.to_string(), Some(&current.hash))
+    }
+
+    /// Move a resume to `.trash/`. Nothing is ever erased.
+    pub fn delete_resume(&self, slug: &str) -> Result<String> {
+        let path = self.resume_path(slug)?;
+        let dir = path.parent().unwrap();
+        if !dir.exists() {
+            bail!("no resume named '{slug}'");
+        }
+        let trash = self.root.join(".trash");
+        fs::create_dir_all(&trash)?;
+        let dest = trash.join(format!("{slug}-{}", now_ms()));
+        fs::rename(dir, &dest)?;
+        Ok(dest.strip_prefix(&self.root).unwrap_or(&dest).display().to_string())
+    }
+
+    fn unique_slug(&self, base: &str) -> String {
+        let base = if base.is_empty() { "resume" } else { base };
+        let mut slug = base.to_string();
+        let mut n = 2;
+        while self.root.join("resumes").join(&slug).exists() {
+            slug = format!("{base}-{n}");
+            n += 1;
+        }
+        slug
+    }
+
+    // ---- profile & memory ----------------------------------------------------
+
+    pub fn read_note(&self, note: Note) -> Result<TextFile> {
+        let content = fs::read_to_string(self.root.join(note.file())).unwrap_or_default();
+        Ok(TextFile { hash: hash(&content), content })
+    }
+
+    pub fn write_note(&self, note: Note, content: &str, expected_hash: Option<&str>) -> Result<TextFile> {
+        let path = self.root.join(note.file());
+        guard(&path, expected_hash)?;
+        atomic_write(&path, content)?;
+        self.read_note(note)
+    }
+
+    pub fn append_memory(&self, text: &str) -> Result<TextFile> {
+        let mut content = self.read_note(Note::Memory)?.content;
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push('\n');
+        content.push_str(text.trim());
+        content.push('\n');
+        atomic_write(&self.root.join(Note::Memory.file()), &content)?;
+        self.read_note(Note::Memory)
+    }
+
+    pub fn profile(&self) -> Doc {
+        Doc::parse(&self.read_note(Note::Profile).map(|f| f.content).unwrap_or_default())
+    }
+
+    // ---- parts (front matter + body edited separately) -----------------------
+
+    fn target_path(&self, t: &Target) -> Result<PathBuf> {
+        match t {
+            Target::Resume(slug) => self.resume_path(slug),
+            Target::Note(n) => Ok(self.root.join(n.file())),
         }
     }
 
-    resumes.sort_by(|a, b| {
-        b.updated
-            .cmp(&a.updated)
-            .then_with(|| a.title.cmp(&b.title))
-    });
-    Ok(resumes)
-}
-
-pub fn load_resume(root: &Path, slug: &str) -> Result<Resume, WorkspaceError> {
-    assert_slug(slug, "resume")?;
-    let md_file = resume_markdown_file(root, slug);
-    if md_file.exists() {
-        let markdown = fs::read_to_string(&md_file)
-            .map_err(|e| WorkspaceError::new(e.to_string(), 500))?;
-        return Ok(markdown_to_resume(&markdown, slug));
-    }
-    Err(WorkspaceError::not_found(format!("Resume not found: {slug}")))
-}
-
-pub fn create_resume(root: &Path, input: &Value) -> Result<Resume, WorkspaceError> {
-    let title = input
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if title.is_empty() {
-        return Err(WorkspaceError::bad_request("A resume title is required."));
-    }
-    let slug_source = input
-        .get("slug")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or(&title);
-    let slug = slugify(slug_source);
-    assert_slug(&slug, "resume")?;
-
-    let file = resume_markdown_file(root, &slug);
-    if file.exists() {
-        return Err(WorkspaceError::conflict(format!(
-            "A resume with slug \"{slug}\" already exists."
-        )));
-    }
-
-    let mut resume = markdown_to_resume(&starter_markdown(&title), &slug);
-    resume.updated = month_stamp();
-    resume.markdown = serialize_resume_markdown(
-        &resume.title,
-        &resume.status,
-        &resume.tags,
-        &resume.updated,
-        &resume.body,
-    );
-    atomic_write_file(&file, &resume.markdown)?;
-    Ok(resume)
-}
-
-pub fn save_resume(root: &Path, slug: &str, input: &Value) -> Result<Resume, WorkspaceError> {
-    assert_slug(slug, "resume")?;
-    load_resume(root, slug)?;
-
-    let markdown = input
-        .get("markdown")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| WorkspaceError::bad_request("Resume Markdown is required."))?;
-    let mut next = markdown_to_resume(markdown, slug);
-    next.updated = month_stamp();
-    next.markdown = serialize_resume_markdown(
-        &next.title,
-        &next.status,
-        &next.tags,
-        &next.updated,
-        &next.body,
-    );
-    atomic_write_file(&resume_markdown_file(root, slug), &next.markdown)?;
-    Ok(next)
-}
-
-pub fn delete_resume(root: &Path, slug: &str) -> Result<(), WorkspaceError> {
-    assert_slug(slug, "resume")?;
-    let dir = root.join("resumes").join(slug);
-    if !dir.exists() {
-        return Err(WorkspaceError::not_found(format!("Resume not found: {slug}")));
-    }
-    fs::remove_dir_all(&dir).map_err(|e| WorkspaceError::new(e.to_string(), 500))?;
-    Ok(())
-}
-
-fn resume_markdown_file(root: &Path, slug: &str) -> PathBuf {
-    root.join("resumes").join(slug).join("resume.md")
-}
-
-pub fn markdown_to_profile(markdown: &str) -> Profile {
-    let parsed = parse_frontmatter(markdown);
-    let get = |k: &str| parsed.meta.get(k).cloned().unwrap_or_default();
-    let name = get("name");
-    let headline = get("headline");
-    let email = get("email");
-    let phone = get("phone");
-    let location = get("location");
-    let website = get("website");
-    let linkedin = get("linkedin");
-    let github = get("github");
-    let body = parsed.body;
-    let normalized_md = serialize_profile_markdown(&ProfileInput {
-        name: &name,
-        headline: &headline,
-        email: &email,
-        phone: &phone,
-        location: &location,
-        website: &website,
-        linkedin: &linkedin,
-        github: &github,
-        body: &body,
-    });
-    Profile {
-        name,
-        headline,
-        email,
-        phone,
-        location,
-        website,
-        linkedin,
-        github,
-        body,
-        markdown: normalized_md,
-    }
-}
-
-pub fn markdown_to_resume(markdown: &str, slug: &str) -> Resume {
-    let parsed = parse_frontmatter(markdown);
-    let tags: Vec<String> = parsed
-        .meta
-        .get("tags")
-        .map(|s| {
-            s.split(',')
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty())
-                .collect()
+    pub fn read_parts(&self, t: &Target) -> Result<Parts> {
+        let path = self.target_path(t)?;
+        let content = match t {
+            Target::Resume(slug) => fs::read_to_string(&path).map_err(|_| Error(format!("no resume named '{slug}'")))?,
+            Target::Note(_) => fs::read_to_string(&path).unwrap_or_default(),
+        };
+        let doc = Doc::parse(&content);
+        let mut fields = serde_json::Map::new();
+        for (k, v) in &doc.meta {
+            let v = match v {
+                Value::Str(s) => serde_json::Value::String(s.clone()),
+                Value::List(l) => serde_json::json!(l),
+            };
+            fields.insert(k.clone(), v);
+        }
+        Ok(Parts {
+            body_offset: content.lines().count().saturating_sub(doc.body.lines().count()),
+            hash: hash(&content),
+            fields,
+            body: doc.body,
         })
-        .unwrap_or_default();
+    }
 
-    let raw_status = parsed.meta.get("status").map(|s| s.as_str()).unwrap_or("draft");
-    let status = match raw_status {
-        "draft" | "active" | "archived" => raw_status.to_string(),
-        _ => "draft".to_string(),
-    };
+    /// Replace the body, keeping the front matter as it is on disk.
+    pub fn write_body(&self, t: &Target, body: &str, expected_hash: Option<&str>) -> Result<Parts> {
+        let path = self.target_path(t)?;
+        if matches!(t, Target::Resume(_)) && !path.exists() {
+            bail!("resume does not exist");
+        }
+        guard(&path, expected_hash)?;
+        let mut doc = Doc::parse(&fs::read_to_string(&path).unwrap_or_default());
+        doc.body = body.to_string();
+        atomic_write(&path, &doc.to_string())?;
+        self.read_parts(t)
+    }
 
-    let title = parsed
-        .meta
-        .get("title")
-        .filter(|s| !s.trim().is_empty())
-        .cloned()
+    /// Set (or, with an empty value, remove) front matter fields, keeping the body.
+    pub fn set_fields(
+        &self,
+        t: &Target,
+        fields: &serde_json::Map<String, serde_json::Value>,
+        expected_hash: Option<&str>,
+    ) -> Result<Parts> {
+        let path = self.target_path(t)?;
+        guard(&path, expected_hash)?;
+        let mut doc = Doc::parse(&fs::read_to_string(&path).unwrap_or_default());
+        for (k, v) in fields {
+            if !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') || k.is_empty() {
+                bail!("invalid field name '{k}'");
+            }
+            let value = match v {
+                serde_json::Value::Array(a) => {
+                    Value::List(a.iter().filter_map(|x| x.as_str()).map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+                }
+                serde_json::Value::String(s) => Value::Str(s.trim().to_string()),
+                serde_json::Value::Null => Value::Str(String::new()),
+                other => Value::Str(other.to_string()),
+            };
+            doc.set(k, value);
+        }
+        atomic_write(&path, &doc.to_string())?;
+        self.read_parts(t)
+    }
+
+    // ---- change detection ----------------------------------------------------
+
+    /// A cheap fingerprint of every file the app shows. Changes when anything is edited
+    /// on disk, by an agent or by hand, so the UI can refresh.
+    pub fn revision(&self) -> String {
+        let mut h = Fnv::new();
+        let mut visit = |p: &Path| {
+            if let Ok(m) = fs::metadata(p) {
+                h.feed(p.to_string_lossy().as_bytes());
+                h.feed(&m.len().to_le_bytes());
+                h.feed(&mtime_ms(p).to_le_bytes());
+            }
+        };
+        visit(&self.root.join("profile.md"));
+        visit(&self.root.join("memory.md"));
+        if let Ok(entries) = fs::read_dir(self.root.join("resumes")) {
+            let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+            paths.sort();
+            for p in paths {
+                visit(&p.join("resume.md"));
+            }
+        }
+        format!("{:016x}", h.0)
+    }
+}
+
+// ---- helpers -----------------------------------------------------------------
+
+fn summarize(slug: &str, text: &str, updated_ms: u64) -> ResumeSummary {
+    let d = Doc::parse(text);
+    let title = d
+        .str("title")
+        .or_else(|| d.body.lines().find_map(|l| l.strip_prefix("# ").map(|t| t.trim().to_string())))
         .unwrap_or_else(|| slug.to_string());
-
-    let updated = parsed
-        .meta
-        .get("updated")
-        .filter(|s| !s.trim().is_empty())
-        .cloned()
-        .unwrap_or_else(month_stamp);
-
-    let body = parsed.body;
-    let summary = excerpt(&body);
-    let normalized_md = serialize_resume_markdown(&title, &status, &tags, &updated, &body);
-
-    Resume {
+    ResumeSummary {
         slug: slug.to_string(),
         title,
-        status,
-        tags,
-        updated,
-        body,
-        markdown: normalized_md,
-        summary,
+        status: d.str("status").unwrap_or_else(|| "draft".into()),
+        tags: d.list("tags"),
+        updated_ms,
+        words: d.body.split_whitespace().filter(|w| w.chars().any(char::is_alphanumeric)).count(),
     }
 }
 
-fn summarize_resume(resume: &Resume) -> ResumeSummary {
-    ResumeSummary {
-        slug: resume.slug.clone(),
-        title: resume.title.clone(),
-        status: resume.status.clone(),
-        updated: resume.updated.clone(),
-        summary: resume.summary.clone(),
-        tags: resume.tags.clone(),
-    }
-}
-
-fn write_json(file_path: &Path, value: &Value) -> Result<(), WorkspaceError> {
-    let text = serde_json::to_string_pretty(value)
-        .map_err(|e| WorkspaceError::new(e.to_string(), 500))?;
-    atomic_write_file(file_path, &format!("{text}\n"))
-}
-
-fn migrate_workspace_marker(marker_path: &Path, payload: Value) -> Result<Value, WorkspaceError> {
-    let Some(obj) = payload.as_object() else {
-        return Err(WorkspaceError::bad_request(format!(
-            "Invalid {WORKSPACE_FILE}: expected a JSON object."
-        )));
-    };
-
-    let version = match obj.get("schemaVersion") {
-        None | Some(Value::Null) => 0,
-        Some(v) => v.as_i64().unwrap_or(-1),
-    };
-    if version < 0 {
-        return Err(WorkspaceError::bad_request(format!(
-            "Invalid {WORKSPACE_FILE}: schemaVersion must be a non-negative integer."
-        )));
-    }
-    if version > SCHEMA_VERSION {
-        return Err(WorkspaceError::conflict(format!(
-            "This workspace uses schema version {version}, but this app supports up to {SCHEMA_VERSION}. Update ResuFlow first."
-        )));
-    }
-    if version == SCHEMA_VERSION {
-        return Ok(payload);
-    }
-
-    let mut migrated = obj.clone();
-    migrated.insert("schemaVersion".to_string(), json!(SCHEMA_VERSION));
-    migrated.insert("migrated".to_string(), json!(iso_timestamp()));
-    let next_val = Value::Object(migrated);
-    write_json(marker_path, &next_val)?;
-    Ok(next_val)
-}
-
-pub fn resolve_abs_path(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        clean_path(path)
+pub fn check_slug(s: &str) -> Result<()> {
+    let ok = !s.is_empty()
+        && s.len() <= 64
+        && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !s.starts_with('-');
+    if ok {
+        Ok(())
     } else {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        clean_path(&cwd.join(path))
+        bail!("invalid name '{s}': use lowercase letters, digits and dashes (max 64)")
     }
 }
 
-fn clean_path(path: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
+pub fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+        if out.len() >= 48 {
+            break;
         }
     }
-    out
+    out.trim_end_matches('-').to_string()
 }
 
-const DATA_REPO_README: &str = "# Resume workspace
+fn guard(path: &Path, expected_hash: Option<&str>) -> Result<()> {
+    if let Some(expected) = expected_hash {
+        let current = fs::read_to_string(path).unwrap_or_default();
+        if hash(&current) != expected {
+            bail!(
+                "conflict: {} changed since it was read (re-read and retry)",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+    }
+    Ok(())
+}
 
-This folder is **your resume data**, not the ResuFlow app.
+fn atomic_write(path: &Path, content: &str) -> Result<()> {
+    let tmp = path.with_extension("md.tmp");
+    fs::write(&tmp, content)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
 
-- `profile.md` — shared name, contact details, and links
-- `memory.md` — durable notes for the resume agent
-- `skills/<slug>/SKILL.md` — custom agent skills
-- `resumes/<slug>/resume.md` — each role-specific resume (Markdown)
-- MCP server (while the app is running): `http://127.0.0.1:4173/mcp` with the per-process bearer token shown in the app
+fn write_if_missing(path: &Path, content: &str) -> Result<()> {
+    if !path.exists() {
+        fs::write(path, content)?;
+    }
+    Ok(())
+}
 
-Edit everything in the local web UI:
+fn mtime_ms(p: &Path) -> u64 {
+    fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 
-```bash
-resuflow
-```
+fn now_ms() -> u128 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)
+}
 
-This folder is your data, not the app. Git is optional; the app does not initialize a repository.
-";
+struct Fnv(u64);
+impl Fnv {
+    fn new() -> Self {
+        Fnv(0xcbf29ce484222325)
+    }
+    fn feed(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 ^= *b as u64;
+            self.0 = self.0.wrapping_mul(0x100000001b3);
+        }
+    }
+}
+
+pub fn hash(s: &str) -> String {
+    let mut h = Fnv::new();
+    h.feed(s.as_bytes());
+    format!("{:016x}", h.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_ws() -> Workspace {
+        let dir = std::env::temp_dir().join(format!("resuflow-test-{}-{}", std::process::id(), now_ms()));
+        Workspace::init(&dir).unwrap()
+    }
+
+    #[test]
+    fn create_edit_conflict_delete() {
+        let ws = temp_ws();
+        let r = ws.create_resume("Staff Engineer, Platform", None, None, None, vec!["rust".into()]).unwrap();
+        assert_eq!(r.summary.slug, "staff-engineer-platform");
+        assert_eq!(r.summary.tags, vec!["rust"]);
+        assert!(!r.content.contains("status:"));
+        assert_eq!(r.summary.status, "draft");
+
+        let r2 = ws.edit_resume(&r.summary.slug, "## Summary", "## Profile", Some(&r.hash)).unwrap();
+        assert!(r2.content.contains("## Profile"));
+        // stale hash is refused
+        assert!(ws.edit_resume(&r.summary.slug, "## Profile", "## X", Some(&r.hash)).is_err());
+
+        let r3 = ws.set_meta(&r.summary.slug, None, Some("ready"), None).unwrap();
+        assert_eq!(r3.summary.status, "ready");
+        assert!(ws.set_meta(&r.summary.slug, None, Some("bogus"), None).is_err());
+
+        let copy = ws.create_resume("Staff Engineer, Platform", None, Some(&r.summary.slug), None, vec![]).unwrap();
+        assert_eq!(copy.summary.slug, "staff-engineer-platform-2");
+        assert_eq!(copy.summary.status, "draft");
+
+        let before = ws.revision();
+        ws.delete_resume(&copy.summary.slug).unwrap();
+        assert_ne!(before, ws.revision());
+        assert_eq!(ws.list_resumes().unwrap().len(), 1);
+        let t = Target::Note(Note::Profile);
+        let p = ws.read_parts(&t).unwrap();
+        let p2 = ws.write_body(&t, "New notes\n", Some(&p.hash)).unwrap();
+        assert_eq!(p2.body, "New notes\n");
+        assert_eq!(p2.fields["name"], "Your Name");
+        let mut f = serde_json::Map::new();
+        f.insert("name".into(), "Ada".into());
+        f.insert("links".into(), serde_json::json!(["a.dev", ""]));
+        f.insert("phone".into(), serde_json::Value::Null);
+        let p3 = ws.set_fields(&t, &f, Some(&p2.hash)).unwrap();
+        assert_eq!(p3.fields["name"], "Ada");
+        assert!(p3.fields.get("phone").is_none());
+        assert_eq!(p3.body, "New notes\n");
+        assert_eq!(p3.body_offset, p3.fields.len() + 3);
+        fs::remove_dir_all(&ws.root).ok();
+    }
+
+    #[test]
+    fn rejects_traversal() {
+        assert!(check_slug("../etc").is_err());
+        assert!(check_slug("a/b").is_err());
+        assert!(check_slug("Good").is_err());
+        assert!(check_slug("good-1").is_ok());
+    }
+}
