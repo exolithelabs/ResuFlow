@@ -7,7 +7,6 @@ const el = {
   filter: $<HTMLInputElement>("filter"),
   title: $<HTMLInputElement>("title"),
   status: $<HTMLSelectElement>("status"),
-  tags: $<HTMLInputElement>("tags"),
   header: $("resume-header"),
   pageScroll: $("page-scroll"),
   checks: $<HTMLDetailsElement>("checks"),
@@ -46,7 +45,7 @@ async function refreshList() {
 function renderList() {
   const q = el.filter.value.trim().toLowerCase();
   const shown = state.resumes.filter(
-    (r) => !q || r.title.toLowerCase().includes(q) || r.tags.some((t) => t.toLowerCase().includes(q)),
+    (r) => !q || r.title.toLowerCase().includes(q),
   );
   el.list.replaceChildren(...shown.map(row));
   if (!shown.length) {
@@ -72,12 +71,6 @@ function row(r: ResumeSummary) {
   label.className = "item-label";
   label.textContent = r.title;
   b.append(dot, label);
-  if (r.tags.length) {
-    const t = document.createElement("span");
-    t.className = "item-tags";
-    t.textContent = r.tags.join(" · ");
-    b.append(t);
-  }
 
   const more = document.createElement("button");
   more.className = "more";
@@ -178,8 +171,7 @@ function applyParts(p: Parts) {
   state.fields = p.fields;
   el.title.value = str(p.fields.title) || state.slug || "";
   el.status.value = str(p.fields.status) || "draft";
-  el.tags.value = list(p.fields.tags).join(", ");
-  renderHeader();
+  fillResumeProps();
 }
 
 async function load(keepPlace = false) {
@@ -238,40 +230,50 @@ function updateStats() {
   el.stats.textContent = `${words} words`;
 }
 
-// ---------------------------------------------------------------- header from profile
+// ---------------------------------------------------------------- header fields, same form as the default template
 
-function renderHeader() {
-  const pick = (k: string) => str(state.fields[k]) || str(state.profile[k]);
-  const name = pick("name");
-  const headline = pick("headline");
-  const links = state.fields.links !== undefined ? list(state.fields.links) : list(state.profile.links);
-  const contacts = [pick("location"), pick("email"), pick("phone"), ...links].filter(Boolean);
+const HEADER_FIELDS = ["name", "headline", "email", "phone", "location", "links"] as const;
 
-  const parts: HTMLElement[] = [];
-  const h1 = document.createElement("h1");
-  h1.textContent = name || "Your name";
-  h1.classList.toggle("placeholder", !name);
-  parts.push(h1);
-  if (headline) {
-    const p = document.createElement("p");
-    p.className = "headline";
-    p.textContent = headline;
-    parts.push(p);
+function headerValue(key: string): string {
+  const own = state.fields[key];
+  if (own !== undefined && str(own) !== "") return str(own);
+  return str(state.profile[key]);
+}
+
+function fillHeader(root: HTMLElement, value: (key: string) => string) {
+  for (const input of root.querySelectorAll("input")) {
+    if (document.activeElement === input) continue;
+    input.value = value(input.name);
   }
-  const c = document.createElement("p");
-  c.className = "contact";
-  c.textContent = contacts.length ? contacts.join("  ·  ") : "Add your contact details in Profile";
-  c.classList.toggle("placeholder", !contacts.length);
-  parts.push(c);
-  el.header.replaceChildren(...parts);
+}
+
+function fillResumeProps() {
+  fillHeader(el.header, headerValue);
 }
 
 async function refreshProfile() {
   state.profile = (await api.readParts("profile")).fields;
-  renderHeader();
+  fillResumeProps();
 }
 
-el.header.onclick = () => void hub.open({ kind: "profile" });
+el.header.addEventListener("change", async (e) => {
+  const input = e.target as HTMLInputElement;
+  if (!state.slug || !HEADER_FIELDS.includes(input.name as (typeof HEADER_FIELDS)[number])) return;
+  await flush();
+  if (state.conflict || !state.slug) return;
+  const value: FieldValue = input.name === "links" ? list(input.value) : input.value;
+  try {
+    const p = await api.setFields(fileId(), { [input.name]: value }, state.hash);
+    applyParts(p);
+    state.revision = await api.revision();
+    setSaveState("Saved");
+    await refreshChecks();
+  } catch (err) {
+    const msg = String(err);
+    if (msg.startsWith("conflict")) showConflict();
+    else setSaveState(`Not saved: ${msg}`, true);
+  }
+});
 
 // ---------------------------------------------------------------- conflicts & live reload
 
@@ -384,10 +386,7 @@ async function updateMeta(meta: { title?: string; status?: Status; tags?: string
 el.status.replaceChildren(...STATUSES.map((s) => new Option(s[0].toUpperCase() + s.slice(1), s)));
 el.status.addEventListener("change", () => updateMeta({ status: el.status.value as Status }));
 el.title.addEventListener("change", () => el.title.value.trim() && updateMeta({ title: el.title.value.trim() }));
-el.tags.addEventListener("change", () => updateMeta({ tags: list(el.tags.value) }));
-for (const input of [el.title, el.tags]) {
-  input.addEventListener("keydown", (e) => e.key === "Enter" && input.blur());
-}
+el.title.addEventListener("keydown", (e) => e.key === "Enter" && el.title.blur());
 
 // ---------------------------------------------------------------- new & print
 
@@ -407,14 +406,7 @@ dlgNew.addEventListener("close", async () => {
 });
 $("new-resume").onclick = newResume;
 $("empty-new").onclick = newResume;
-$("print").onclick = printCurrent;
 $("save-pdf").onclick = savePdf;
-
-async function printCurrent() {
-  if (!state.slug) return;
-  await flush();
-  await api.printResume(state.slug).catch((e) => setSaveState(String(e), true));
-}
 
 async function savePdf() {
   if (!state.slug) return;
@@ -430,14 +422,22 @@ async function savePdf() {
 
 // ================================================================ Agent panel
 
-type Tab = { kind: "profile" | "memory" | "connect" } | { kind: "skill"; name: string };
+type Tab = { kind: "profile" | "instructions" | "connect" } | { kind: "skill"; name: string };
 
 const hub = (() => {
   const dlg = $<HTMLDialogElement>("dlg-hub");
-  const props = $<HTMLFormElement>("hub-props");
+  const templateHeader = $("template-header");
   const saveEl = $("hub-save");
   const host = $("hub-editor-host");
-  const s = { tab: { kind: "profile" } as Tab, hash: "", dirty: false, timer: 0, conflict: false, skills: [] as Skill[] };
+  const s = {
+    tab: { kind: "profile" } as Tab,
+    hash: "",
+    dirty: false,
+    timer: 0,
+    conflict: false,
+    skills: [] as Skill[],
+    items: [] as string[],
+  };
 
   const ed = createLiveEditor({
     parent: host,
@@ -450,13 +450,14 @@ const hub = (() => {
   });
 
   const TEXT = {
-    profile: ["Profile", "Who you are on every resume, plus the private notes your agent writes from."],
-    memory: ["Memory", "Durable notes your agents keep between sessions: target roles, preferences, decisions."],
+    profile: ["Default template", "Your details, and the starting content copied into every new resume."],
+    instructions: ["Instructions", "Rules you write for your agent. The agent can read them and cannot change them."],
     connect: ["Connect an agent", "Let your AI agent read and edit your resumes."],
   } as const;
 
   const key = (t: Tab) => (t.kind === "skill" ? `skill:${t.name}` : t.kind);
-  const editable = (t: Tab): t is { kind: "profile" | "memory" } => t.kind === "profile" || t.kind === "memory";
+  const editable = (t: Tab): t is { kind: "profile" | "instructions" } => t.kind === "profile" || t.kind === "instructions";
+  const listEl = $("instruction-list");
 
   function status(text: string, error = false) {
     saveEl.textContent = text;
@@ -493,10 +494,10 @@ const hub = (() => {
     $("hub-desc").textContent = desc;
     status("");
 
-    props.hidden = tab.kind !== "profile";
-    $("hub-notes-label").hidden = tab.kind !== "profile";
+    templateHeader.hidden = tab.kind !== "profile";
     $("hub-skill-bar").hidden = tab.kind !== "skill";
-    host.hidden = tab.kind === "connect";
+    host.hidden = tab.kind !== "profile" && tab.kind !== "skill";
+    $("hub-instructions").hidden = tab.kind !== "instructions";
     $("hub-connect").hidden = tab.kind !== "connect";
 
     if (tab.kind === "connect") {
@@ -513,23 +514,60 @@ const hub = (() => {
     }
     ed.setReadOnly(false);
     await reload(false);
-    if (tab.kind === "memory") ed.focus();
+    if (tab.kind === "profile") ed.focus();
   }
 
-  function fillProps(fields: Parts["fields"]) {
-    for (const input of props.querySelectorAll("input")) {
-      if (document.activeElement !== input) input.value = str(fields[input.name]);
-    }
+  function renderInstructions() {
+    listEl.replaceChildren(
+      ...s.items.map((text, index) => {
+        const row = document.createElement("div");
+        row.className = "instruction";
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.placeholder = "Write an instruction for your agent";
+        area.rows = 3;
+        area.oninput = () => {
+          s.items[index] = area.value;
+          s.dirty = true;
+          status("Editing…");
+          clearTimeout(s.timer);
+          s.timer = window.setTimeout(() => void save(), 450);
+        };
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "icon-btn";
+        remove.title = "Remove instruction";
+        remove.textContent = "×";
+        remove.onclick = () => {
+          s.items.splice(index, 1);
+          s.dirty = true;
+          renderInstructions();
+          void save();
+        };
+        row.append(area, remove);
+        return row;
+      }),
+    );
   }
 
   async function reload(keepPlace = true) {
     const t = s.tab;
     if (!editable(t)) return;
+    if (t.kind === "instructions") {
+      const file = await api.readInstructions();
+      s.hash = file.hash;
+      s.items = file.items.length ? file.items : [""];
+      s.dirty = false;
+      s.conflict = false;
+      renderInstructions();
+      status(file.items.length ? "Saved" : "");
+      return;
+    }
     const p = await api.readParts(t.kind);
     s.hash = p.hash;
     s.dirty = false;
     s.conflict = false;
-    if (t.kind === "profile") fillProps(p.fields);
+    if (t.kind === "profile") fillHeader(templateHeader, (key) => str(p.fields[key]));
     ed.set(p.body, keepPlace);
     status("Saved");
   }
@@ -544,13 +582,20 @@ const hub = (() => {
     clearTimeout(s.timer);
     const t = s.tab;
     if (!s.dirty || s.conflict || !editable(t)) return;
-    const body = ed.get();
     try {
       status("Saving…");
-      const p = await api.writeBody(t.kind, body, s.hash);
-      s.hash = p.hash;
-      if (ed.get() === body) s.dirty = false;
-      status(s.dirty ? "Editing…" : "Saved");
+      if (t.kind === "instructions") {
+        const file = await api.writeInstructions(s.items, s.hash);
+        s.hash = file.hash;
+        s.dirty = false;
+        status("Saved");
+      } else {
+        const body = ed.get();
+        const p = await api.writeBody(t.kind, body, s.hash);
+        s.hash = p.hash;
+        if (ed.get() === body) s.dirty = false;
+        status(s.dirty ? "Editing…" : "Saved");
+      }
       state.revision = await api.revision();
     } catch (e) {
       if (String(e).startsWith("conflict")) conflict();
@@ -558,9 +603,9 @@ const hub = (() => {
     }
   }
 
-  // Profile properties save on change; the header updates right away.
-  props.addEventListener("change", async (e) => {
+  templateHeader.addEventListener("change", async (e) => {
     const input = e.target as HTMLInputElement;
+    if (s.tab.kind !== "profile") return;
     await save();
     if (s.conflict) return;
     const value: FieldValue = input.name === "links" ? list(input.value) : input.value;
@@ -569,7 +614,7 @@ const hub = (() => {
       const p = await api.setFields("profile", { [input.name]: value }, s.hash);
       s.hash = p.hash;
       state.profile = p.fields;
-      renderHeader();
+      fillResumeProps();
       status("Saved");
       state.revision = await api.revision();
     } catch (err) {
@@ -577,12 +622,14 @@ const hub = (() => {
       else status(`Not saved: ${err}`, true);
     }
   });
-  props.addEventListener("submit", (e) => e.preventDefault());
 
   async function onDiskChange() {
     const t = s.tab;
     if (!dlg.open || !editable(t)) return;
-    const p = await api.readParts(t.kind).catch(() => null);
+    const p =
+      t.kind === "instructions"
+        ? await api.readInstructions().catch(() => null)
+        : await api.readParts(t.kind).catch(() => null);
     if (!p || p.hash === s.hash) return;
     if (s.dirty) conflict();
     else await reload();
@@ -624,6 +671,13 @@ const hub = (() => {
     void close();
   });
   $("hub-close").onclick = () => void close();
+  $("instruction-add").onclick = () => {
+    s.items.push("");
+    s.dirty = true;
+    renderInstructions();
+    const areas = listEl.querySelectorAll("textarea");
+    areas[areas.length - 1]?.focus();
+  };
 
   return { open, onDiskChange, save, isOpen: () => dlg.open };
 })();
@@ -652,9 +706,6 @@ document.addEventListener("keydown", (e) => {
   } else if (k === "s") {
     e.preventDefault();
     void (hub.isOpen() ? hub.save() : save());
-  } else if (k === "p" && !hub.isOpen()) {
-    e.preventDefault();
-    void printCurrent();
   } else if (k === "n" && !hub.isOpen()) {
     e.preventDefault();
     newResume();
@@ -665,12 +716,7 @@ window.addEventListener("beforeunload", () => void flush());
 
 async function boot() {
   const info = await api.info();
-  // Without direct export, Print (and its "Save as PDF" option) is the way to a PDF.
-  if (!info.pdf_export) {
-    $("save-pdf").hidden = true;
-    $("print").classList.replace("ghost", "primary");
-    $("print").textContent = "Print / PDF";
-  }
+  if (!info.pdf_export) $("save-pdf").hidden = true;
   state.slug = null;
   await Promise.all([refreshList(), refreshProfile()]);
   state.revision = await api.revision();

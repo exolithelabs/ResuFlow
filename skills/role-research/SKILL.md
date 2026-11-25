@@ -12,8 +12,8 @@ Use before creating or tailoring a resume for a specific job.
    - **Must-haves**: hard requirements, years, certifications, stack.
    - **Signals**: repeated nouns and verbs, which reveal what the team actually cares about.
    - **Outcomes**: what success in the role looks like (scale, revenue, reliability, users).
-3. Read `profile.md` with `read_profile`. Map each must-have to concrete evidence from the user's history. Mark gaps honestly. Never invent experience to fill one.
-4. Save a short brief with `append_memory`, headed `## Target: <Company> — <Title>`: the top 5 keywords, the 3 strongest proof points, and the gaps.
-5. Create the variant with `create_resume` (copy the closest existing resume with `from`), tag it with the company, and continue with the `impact-bullets` skill.
+3. Read the default template with `read_profile`, and read `read_instructions`. Follow every instruction. Map each must-have to concrete evidence from the user's history. Mark gaps honestly. Never invent experience to fill one.
+4. Keep the targeting brief in the conversation: the top 5 keywords, the 3 strongest proof points, and the gaps. Do not write it into instructions; only the user edits those.
+5. Create the variant with `create_resume` (copy the closest existing resume with `from`, or omit `from` to start from the default template), tag it with the company, and continue with the `impact-bullets` skill.
 
 Keep keywords literal (ATS matching is mostly lexical): if the posting says "Kubernetes", don't write only "container orchestration".

@@ -3,8 +3,8 @@
 //! ```text
 //! <workspace>/
 //!   resuflow.json          marker file
-//!   profile.md             shared identity + contact (front matter) and career notes (body)
-//!   memory.md              durable notes agents keep between sessions
+//!   profile.md             default template: contact header (front matter) and the body copied into each new resume
+//!   instructions.md        rules the user writes; agents read them and never change them
 //!   resumes/<slug>/resume.md
 //!   .trash/                deleted resumes are moved here, never erased
 //! ```
@@ -84,48 +84,33 @@ pub enum Target {
     Resume(String),
     Note(Note),
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Note {
     Profile,
-    Memory,
+    Instructions,
 }
 
 impl Note {
     fn file(self) -> &'static str {
         match self {
             Note::Profile => "profile.md",
-            Note::Memory => "memory.md",
+            Note::Instructions => "instructions.md",
         }
     }
+}
+
+/// Instructions as the app edits them: one string per box.
+#[derive(Serialize, Clone, Debug)]
+pub struct InstructionFile {
+    pub items: Vec<String>,
+    pub hash: String,
 }
 
 pub struct Workspace {
     pub root: PathBuf,
 }
 
-const PROFILE_TEMPLATE: &str = "---
-name: Your Name
-headline: What you do, in one line
-email: you@example.com
-phone: \"+00 00000 00000\"
-location: City, Country
-links: [linkedin.com/in/you, github.com/you]
----
-
-# Career notes
-
-The front matter above becomes the header of every resume.
-
-Everything below is private source material for writing resumes: roles, projects,
-metrics, wins, tools. It is never printed. Be generous here; resumes pick from it.
-";
-
-const MEMORY_TEMPLATE: &str = "# Memory
-
-Durable notes for AI agents working in this workspace: preferences, decisions,
-target roles, things to avoid. Agents append here; edit freely.
-";
-
+/// Body copied into every new resume. Also the body of a fresh profile.md.
 const RESUME_TEMPLATE: &str = "## Summary
 
 Two or three lines aimed at this role.
@@ -148,6 +133,28 @@ Two or three lines aimed at this role.
 *Year*
 ";
 
+fn default_profile() -> String {
+    format!(
+        "---
+name: Your Name
+headline: What you do, in one line
+email: you@example.com
+phone: \"+00 00000 00000\"
+location: City, Country
+links: [linkedin.com/in/you, github.com/you]
+---
+
+{RESUME_TEMPLATE}"
+    )
+}
+
+/// Previous default of memory.md, recognised only so a rename does not keep the boilerplate as an instruction.
+const MEMORY_TEMPLATE: &str = "# Memory
+
+Durable notes for AI agents working in this workspace: preferences, decisions,
+target roles, things to avoid. Agents append here; edit freely.
+";
+
 impl Workspace {
     /// Open an existing folder as a workspace. Missing pieces are created lazily.
     pub fn open(root: impl Into<PathBuf>) -> Result<Workspace> {
@@ -164,9 +171,10 @@ impl Workspace {
         let root = root.into();
         fs::create_dir_all(root.join("resumes"))?;
         write_if_missing(&root.join("resuflow.json"), "{\n  \"app\": \"resuflow\",\n  \"format\": 2\n}\n")?;
-        write_if_missing(&root.join("profile.md"), PROFILE_TEMPLATE)?;
-        write_if_missing(&root.join("memory.md"), MEMORY_TEMPLATE)?;
-        Workspace::open(root)
+        write_if_missing(&root.join("profile.md"), &default_profile())?;
+        let ws = Workspace::open(root)?;
+        ws.ensure_instructions()?;
+        Ok(ws)
     }
 
     pub fn is_workspace(dir: &Path) -> bool {
@@ -232,8 +240,10 @@ impl Workspace {
         let mut doc = match (content, from) {
             (Some(c), _) => Doc::parse(c),
             (None, Some(src)) => Doc::parse(&self.read_resume(src)?.content),
-            (None, None) => Doc { meta: vec![], body: RESUME_TEMPLATE.to_string() },
+            (None, None) => Doc { meta: vec![], body: self.template_body() },
         };
+        // Header fields follow the default template unless this resume already has its own.
+        self.copy_header(&mut doc);
         doc.set("title", Value::Str(title.to_string()));
         if from.is_some() {
             doc.set("status", Value::Str(String::new())); // a copy starts over as a draft
@@ -329,9 +339,36 @@ impl Workspace {
         slug
     }
 
-    // ---- profile & memory ----------------------------------------------------
+    /// Name, headline, email, phone, location and links. Missing ones are filled from the template.
+    fn copy_header(&self, doc: &mut Doc) {
+        let profile = self.profile();
+        for key in ["name", "headline", "email", "phone", "location"] {
+            if doc.str(key).is_none() {
+                if let Some(value) = profile.str(key) {
+                    doc.set(key, Value::Str(value));
+                }
+            }
+        }
+        if doc.get("links").is_none() {
+            let links = profile.list("links");
+            if !links.is_empty() {
+                doc.set("links", Value::List(links));
+            }
+        }
+    }
+
+    /// Body of the default template (`profile.md`). Empty templates fall back to the built-in skeleton.
+    fn template_body(&self) -> String {
+        let body = self.profile().body;
+        if body.trim().is_empty() { RESUME_TEMPLATE.to_string() } else { body }
+    }
+
+    // ---- profile & instructions ----------------------------------------------
 
     pub fn read_note(&self, note: Note) -> Result<TextFile> {
+        if note == Note::Instructions {
+            self.ensure_instructions()?;
+        }
         let content = fs::read_to_string(self.root.join(note.file())).unwrap_or_default();
         Ok(TextFile { hash: hash(&content), content })
     }
@@ -343,16 +380,37 @@ impl Workspace {
         self.read_note(note)
     }
 
-    pub fn append_memory(&self, text: &str) -> Result<TextFile> {
-        let mut content = self.read_note(Note::Memory)?.content;
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
+    pub fn read_instructions(&self) -> Result<InstructionFile> {
+        let file = self.read_note(Note::Instructions)?;
+        Ok(InstructionFile { items: decode_instructions(&file.content), hash: file.hash })
+    }
+
+    /// Replace the instruction boxes. Agents must not call this; the desktop app does.
+    pub fn write_instructions(&self, items: &[String], expected_hash: Option<&str>) -> Result<InstructionFile> {
+        self.ensure_instructions()?;
+        let path = self.root.join(Note::Instructions.file());
+        guard(&path, expected_hash)?;
+        atomic_write(&path, &encode_instructions(items))?;
+        self.read_instructions()
+    }
+
+    /// Create `instructions.md`. A leftover `memory.md` is renamed into it once, then removed.
+    fn ensure_instructions(&self) -> Result<()> {
+        let path = self.root.join("instructions.md");
+        if path.exists() {
+            return Ok(());
         }
-        content.push('\n');
-        content.push_str(text.trim());
-        content.push('\n');
-        atomic_write(&self.root.join(Note::Memory.file()), &content)?;
-        self.read_note(Note::Memory)
+        let memory_path = self.root.join("memory.md");
+        let items = if memory_path.is_file() {
+            migrated_memory_items(&fs::read_to_string(&memory_path).unwrap_or_default())
+        } else {
+            Vec::new()
+        };
+        atomic_write(&path, &encode_instructions(&items))?;
+        if memory_path.is_file() {
+            let _ = fs::remove_file(&memory_path);
+        }
+        Ok(())
     }
 
     pub fn profile(&self) -> Doc {
@@ -445,8 +503,9 @@ impl Workspace {
                 h.feed(&mtime_ms(p).to_le_bytes());
             }
         };
+        let _ = self.ensure_instructions();
         visit(&self.root.join("profile.md"));
-        visit(&self.root.join("memory.md"));
+        visit(&self.root.join("instructions.md"));
         if let Ok(entries) = fs::read_dir(self.root.join("resumes")) {
             let mut paths: Vec<_> = entries.flatten().map(|e| e.path()).collect();
             paths.sort();
@@ -556,6 +615,53 @@ impl Fnv {
     }
 }
 
+fn encode_instructions(items: &[String]) -> String {
+    let mut s = String::from("# Instructions\n");
+    for item in items {
+        s.push_str("\n---\n\n");
+        s.push_str(item.trim_end());
+        if !s.ends_with('\n') {
+            s.push('\n');
+        }
+    }
+    s
+}
+
+fn decode_instructions(content: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut cur = String::new();
+    let mut started = false;
+    for line in content.lines() {
+        if line.trim() == "---" {
+            if started {
+                items.push(cur.trim().to_string());
+            }
+            started = true;
+            cur.clear();
+        } else if started {
+            cur.push_str(line);
+            cur.push('\n');
+        }
+    }
+    if started {
+        items.push(cur.trim().to_string());
+    }
+    items
+}
+
+fn migrated_memory_items(text: &str) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed == MEMORY_TEMPLATE.trim() {
+        return Vec::new();
+    }
+    if let Some(rest) = trimmed.strip_prefix("# Memory") {
+        let rest = rest.trim();
+        if rest.is_empty() { Vec::new() } else { vec![rest.to_string()] }
+    } else {
+        vec![trimmed.to_string()]
+    }
+}
+
 pub fn hash(s: &str) -> String {
     let mut h = Fnv::new();
     h.feed(s.as_bytes());
@@ -611,7 +717,40 @@ mod tests {
         assert!(p3.fields.get("phone").is_none());
         assert_eq!(p3.body, "New notes\n");
         assert_eq!(p3.body_offset, p3.fields.len() + 3);
+
+        let fresh = ws.create_resume("From the template", None, None, None, vec![]).unwrap();
+        assert!(fresh.content.contains("New notes"));
+        assert!(fresh.content.contains("name: Ada"));
+        assert!(!fresh.content.contains("## Summary"));
+
+        let ins = ws.read_instructions().unwrap();
+        assert!(ins.items.is_empty());
+        let ins = ws.write_instructions(&["Lead with the target role.".into(), "No tables.".into()], Some(&ins.hash)).unwrap();
+        assert_eq!(ins.items, vec!["Lead with the target role.", "No tables."]);
+        assert!(ws.write_instructions(&["stale".into()], Some("not-the-hash")).is_err());
         fs::remove_dir_all(&ws.root).ok();
+    }
+
+    #[test]
+    fn memory_file_becomes_instructions() {
+        let dir = std::env::temp_dir().join(format!("resuflow-mem-{}-{}", std::process::id(), now_ms()));
+        fs::create_dir_all(dir.join("resumes")).unwrap();
+        fs::write(dir.join("resuflow.json"), "{}\n").unwrap();
+        fs::write(dir.join("profile.md"), "---\nname: A\n---\n\n").unwrap();
+        fs::write(dir.join("memory.md"), "# Memory\n\nPrefer one page.\n").unwrap();
+        let ws = Workspace::open(&dir).unwrap();
+        let ins = ws.read_instructions().unwrap();
+        assert_eq!(ins.items, vec!["Prefer one page."]);
+        assert!(!dir.join("memory.md").exists());
+
+        let dir2 = std::env::temp_dir().join(format!("resuflow-memstock-{}-{}", std::process::id(), now_ms()));
+        fs::create_dir_all(dir2.join("resumes")).unwrap();
+        fs::write(dir2.join("memory.md"), MEMORY_TEMPLATE).unwrap();
+        let ws2 = Workspace::open(&dir2).unwrap();
+        assert!(ws2.read_instructions().unwrap().items.is_empty());
+        assert!(!dir2.join("memory.md").exists());
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_dir_all(&dir2).ok();
     }
 
     #[test]

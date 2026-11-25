@@ -15,13 +15,14 @@ use std::path::PathBuf;
 const SUPPORTED: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 const INSTRUCTIONS: &str = "ResuFlow keeps the user's resumes as Markdown files in a local workspace. \
-Start with get_workspace: it returns the profile, memory, resume list and available skills. \
-profile.md holds identity/contact (front matter, printed in every resume header) and private career notes (body, never printed): \
-mine it for facts, never invent experience or metrics. Each resume is resumes/<slug>/resume.md with front matter \
-(title, status, tags, optional headline/links overrides) and a Markdown body using ## sections, ### Role — Company, and - bullets. \
+Start with get_workspace: it returns the default template, instructions, resume list and available skills. \
+profile.md is the default template. Its front matter (name, headline, email, phone, location, links) is the printed header of every resume. \
+Its body is copied into each new resume, so edit that body to change what a new resume starts as. Mine it for facts; never invent experience or metrics. \
+instructions.md is a list of rules the user writes. Read them with read_instructions and follow them. Do not try to change them; only the user edits instructions in the app. \
+Each resume is resumes/<slug>/resume.md with front matter (title, status, tags, optional headline/links overrides) and a Markdown body using ## sections, ### Role — Company, and - bullets. \
 Prefer edit_resume for targeted changes and pass the expected_hash you got from a read, so you never overwrite the user's \
-concurrent edits in the desktop app. Run check_resume after editing. Record lasting preferences and target-role briefs with \
-append_memory. Load a skill with read_skill (or the matching prompt) before resume research, bullet writing, ATS passes or critiques.";
+concurrent edits in the desktop app. Run check_resume after editing. \
+Load a skill with read_skill (or the matching prompt) before resume research, bullet writing, ATS passes or critiques.";
 
 pub fn serve(dir: Option<PathBuf>) -> io::Result<()> {
     let stdin = io::stdin();
@@ -130,14 +131,13 @@ impl Server {
                     },
                     "resumes": j(ws.list_resumes())?,
                     "skills": crate::skills::list().into_iter().map(|s| json!({ "name": s.name, "description": s.description })).collect::<Vec<_>>(),
-                    "memory": ws.read_note(Note::Memory).map_err(|e| e.0)?.content,
+                    "instructions": ws.read_instructions().map_err(|e| e.0)?.items,
                     "statuses": STATUSES,
                 }))
             }
             "read_profile" => j(ws.read_note(Note::Profile)),
             "update_profile" => j(ws.write_note(Note::Profile, req("content")?, hash)),
-            "append_memory" => j(ws.append_memory(req("text")?)),
-            "update_memory" => j(ws.write_note(Note::Memory, req("content")?, hash)),
+            "read_instructions" => j(ws.read_instructions()),
             "list_resumes" => {
                 let mut list = ws.list_resumes().map_err(|e| e.0)?;
                 if let Some(st) = s("status") {
@@ -232,11 +232,10 @@ fn tools() -> Vec<Value> {
     let tags = json!({ "type": "array", "items": { "type": "string" } });
     let status = json!({ "type": "string", "enum": STATUSES });
     vec![
-        tool("get_workspace", "Overview: workspace path, profile name and headline, all resumes, skills, full memory. Call first.", json!({}), &[], true),
-        tool("read_profile", "Read profile.md: front matter (name, headline, email, phone, location, links) is the printed header; the body is private career notes to draw facts from.", json!({}), &[], true),
-        tool("update_profile", "Replace profile.md entirely.", json!({ "content": { "type": "string" }, "expected_hash": hash }), &["content"], false),
-        tool("append_memory", "Append a note to memory.md: preferences, decisions, target-role briefs worth keeping across sessions.", json!({ "text": { "type": "string" } }), &["text"], false),
-        tool("update_memory", "Replace memory.md entirely (to reorganise or prune it).", json!({ "content": { "type": "string" }, "expected_hash": hash }), &["content"], false),
+        tool("get_workspace", "Overview: workspace path, template name and headline, instruction boxes, all resumes, skills. Call first.", json!({}), &[], true),
+        tool("read_profile", "Read the default template (profile.md). Front matter is the printed header of every resume. The body is copied into each new resume.", json!({}), &[], true),
+        tool("update_profile", "Replace the default template (profile.md) entirely. New resumes copy its body.", json!({ "content": { "type": "string" }, "expected_hash": hash }), &["content"], false),
+        tool("read_instructions", "Read the user's instruction boxes. Follow them. Do not try to change them; only the user edits instructions in the app.", json!({}), &[], true),
         tool("list_resumes", "List resumes (newest first), optionally filtered.", json!({ "status": status, "tag": { "type": "string" } }), &[], true),
         tool("read_resume", "Read a resume's full Markdown source, metadata and hash.", json!({ "slug": slug }), &["slug"], true),
         tool("create_resume", "Create a resume. Use `from` to copy an existing resume (the usual way to tailor a variant), or `content` for full Markdown. Slug is derived from title if omitted.", json!({ "title": { "type": "string" }, "slug": slug, "from": { "type": "string", "description": "Slug to copy" }, "content": { "type": "string" }, "tags": tags }), &["title"], false),

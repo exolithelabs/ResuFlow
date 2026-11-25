@@ -4,7 +4,7 @@
 use crate::config;
 use crate::lint::Report;
 use crate::skills::{self, Skill};
-use crate::workspace::{Note, Parts, ResumeSummary, Target, Workspace};
+use crate::workspace::{InstructionFile, Note, Parts, ResumeSummary, Target, Workspace};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -27,7 +27,7 @@ fn with<T>(s: &State<AppState>, f: impl FnOnce(&Workspace) -> crate::workspace::
 fn target(t: &str) -> Res<Target> {
     match t {
         "profile" => Ok(Target::Note(Note::Profile)),
-        "memory" => Ok(Target::Note(Note::Memory)),
+        "instructions" => Ok(Target::Note(Note::Instructions)),
         _ => t.strip_prefix("resume:").map(|s| Target::Resume(s.into())).ok_or_else(|| format!("unknown file '{t}'")),
     }
 }
@@ -67,6 +67,16 @@ fn list_resumes(s: State<AppState>) -> Res<Vec<ResumeSummary>> {
 #[tauri::command]
 fn create_resume(s: State<AppState>, title: String) -> Res<String> {
     with(&s, |w| w.create_resume(&title, None, None, None, vec![]).map(|r| r.summary.slug))
+}
+
+#[tauri::command]
+fn read_instructions(s: State<AppState>) -> Res<InstructionFile> {
+    with(&s, |w| w.read_instructions())
+}
+
+#[tauri::command]
+fn write_instructions(s: State<AppState>, items: Vec<String>, expected_hash: Option<String>) -> Res<InstructionFile> {
+    with(&s, |w| w.write_instructions(&items, expected_hash.as_deref()))
 }
 
 #[tauri::command]
@@ -221,6 +231,7 @@ pub fn run(dir: Option<PathBuf>) {
     builder(open_or_exit(dir))
         .invoke_handler(tauri::generate_handler![
             info, revision, list_resumes, create_resume, read_parts, write_body, set_fields, set_meta,
+            read_instructions, write_instructions,
             delete_resume, check_resume, list_skills, install_skills, print_resume, save_pdf
         ])
         .run(tauri::generate_context!())

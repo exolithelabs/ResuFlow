@@ -48,7 +48,7 @@ pub fn check_doc(profile: &Doc, content: &str) -> Report {
 
     let field = |k: &str| resume.str(k).or_else(|| profile.str(k));
     if field("name").is_none() {
-        add("error", "No name: set `name:` in profile.md front matter.".into(), None);
+        add("error", "No name: set it on the default template.".into(), None);
     }
     if field("email").is_none() && field("phone").is_none() {
         add("error", "No email or phone: recruiters and ATS parsers need a contact.".into(), None);
@@ -56,7 +56,7 @@ pub fn check_doc(profile: &Doc, content: &str) -> Report {
 
     for (k, placeholder) in [("name", "Your Name"), ("email", "you@example.com"), ("headline", "What you do, in one line")] {
         if field(k).as_deref() == Some(placeholder) {
-            add("warn", format!("`{k}` is still the template value: edit profile.md."), None);
+            add("warn", format!("`{k}` is still the template value: edit the default template."), None);
         }
     }
 

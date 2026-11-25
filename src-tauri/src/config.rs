@@ -24,7 +24,7 @@ pub fn resolve(explicit: Option<PathBuf>) -> PathBuf {
 }
 
 /// Open the data folder, creating it on first run. On that first run, copies (never moves)
-/// resumes, profile and memory from the previous default location, `~/Documents/ResuFlow`.
+/// resumes, profile and instructions from the previous default location, `~/Documents/ResuFlow`.
 pub fn workspace(explicit: Option<PathBuf>) -> Result<Workspace> {
     let dir = resolve(explicit.clone());
     if explicit.is_none() && !dir.exists() {
@@ -41,7 +41,7 @@ pub fn workspace(explicit: Option<PathBuf>) -> Result<Workspace> {
 
 fn import(from: &Path, to: &Path) -> std::io::Result<()> {
     fs::create_dir_all(to.join("resumes"))?;
-    for f in ["profile.md", "memory.md"] {
+    for f in ["profile.md", "instructions.md", "memory.md"] {
         if from.join(f).is_file() {
             fs::copy(from.join(f), to.join(f))?;
         }

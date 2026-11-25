@@ -42,8 +42,12 @@ export interface Info {
   version: string;
   pdf_export: boolean;
 }
-/** "profile", "memory" or "resume:<slug>" */
+/** "profile", "instructions" or "resume:<slug>" */
 export type FileId = string;
+export interface InstructionFile {
+  items: string[];
+  hash: string;
+}
 export type FieldValue = string | string[] | null;
 
 export const api = {
@@ -58,9 +62,11 @@ export const api = {
     invoke<Parts>("set_fields", { file, fields, expectedHash }),
   setMeta: (slug: string, meta: { title?: string; status?: Status; tags?: string[] }) =>
     invoke<Parts>("set_meta", { slug, ...meta }),
+  readInstructions: () => invoke<InstructionFile>("read_instructions"),
+  writeInstructions: (items: string[], expectedHash?: string) =>
+    invoke<InstructionFile>("write_instructions", { items, expectedHash }),
   deleteResume: (slug: string) => invoke<string>("delete_resume", { slug }),
   checkResume: (slug: string) => invoke<Report>("check_resume", { slug }),
-  printResume: (slug: string) => invoke<void>("print_resume", { slug }),
   /** Asks where to save; resolves to the saved path, or null if cancelled. */
   savePdf: (slug: string) => invoke<string | null>("save_pdf", { slug }),
   listSkills: () => invoke<Skill[]>("list_skills"),

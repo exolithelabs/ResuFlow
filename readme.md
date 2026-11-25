@@ -29,19 +29,19 @@ reloads, or asks you if you were mid-edit.
 ## Where your data lives
 
 ResuFlow picks the folder for you: `~/.local/share/resuflow` on Linux, `~/Library/Application Support/resuflow`
-on macOS, `%APPDATA%\resuflow` on Windows. On first run it copies resumes, profile and memory from the old default,
+on macOS, `%APPDATA%\resuflow` on Windows. On first run it copies resumes, the default template and instructions from the old default,
 `~/Documents/ResuFlow`, and leaves the originals in place.
 
 ```text
 resuflow/
   resuflow.json             marker
-  profile.md                front matter = printed header · body = private career notes
-  memory.md                 notes agents keep between sessions
+  profile.md                default template: front matter = printed header · body = copied into each new resume
+  instructions.md           rules you write; agents read them and do not change them
   resumes/<slug>/resume.md  one folder per variant
   .trash/                   deleted resumes land here; nothing is erased
 ```
 
-In the app, a resume is one page: the header comes from your profile, and you edit the body in place. Title,
+In the app, a resume is one page with the same header fields as the default template (name, headline, email, phone, location, links). A new resume starts as a copy of that template, header and body. Title,
 status and tags live in the toolbar. On disk it's Markdown with a little front matter (new resumes start with
 just a title):
 
@@ -63,7 +63,7 @@ headline: Payments platform engineer   # optional; overrides profile.md
 
 ## Connect an agent
 
-In the app, open **Agent → Connect an agent** (bottom of the sidebar) for a ready-to-copy config, or:
+In the app, open **Configuration → Connect an agent** (bottom of the sidebar) for a ready-to-copy config, or:
 
 ```bash
 claude mcp add resuflow -- resuflow mcp        # Claude Code
@@ -73,10 +73,10 @@ claude mcp add resuflow -- resuflow mcp        # Claude Code
 { "mcpServers": { "resuflow": { "command": "resuflow", "args": ["mcp"] } } }
 ```
 
-The agent works on the same data folder as the app. The **Agent** panel holds everything it uses: profile, memory,
-the built-in skills and this connection.
+The agent works on the same data folder as the app. The **Configuration** panel holds the default template, your instructions,
+the built-in skills and this connection. You edit instructions; the agent only reads them.
 
-**Tools:** `get_workspace`, `read_profile`, `update_profile`, `append_memory`, `update_memory`, `list_resumes`,
+**Tools:** `get_workspace`, `read_profile`, `update_profile`, `read_instructions`, `list_resumes`,
 `read_resume`, `create_resume`, `write_resume`, `edit_resume`, `set_resume_meta`, `delete_resume`, `check_resume`,
 `render_resume`, `read_skill`.
 
@@ -84,7 +84,7 @@ the built-in skills and this connection.
 
 ResuFlow ships four read-only writing skills: `role-research`, `impact-bullets`, `ats-pass` and `recruiter-review`.
 Agents load them over MCP (`read_skill`, or as MCP prompts). To give your agent its own copy, open
-**Agent →** any skill **→ Install in Claude Code** (`~/.claude/skills`) or **Install in other
+**Configuration →** any skill **→ Install in Claude Code** (`~/.claude/skills`) or **Install in other**
 agents** (`~/.agents/skills`), or run `resuflow install-skills claude|agents`. They install as `resuflow-<name>`, so
 they never overwrite your own skills.
 
@@ -103,9 +103,8 @@ For development, `--dir DIR` or `$RESUFLOW_DIR` points any command at another fo
 
 ## PDF
 
-**Save PDF** (Ctrl+Shift+S) asks where to save and writes an A4 PDF with real, selectable text. It's the only
-time ResuFlow asks you for a location. **Print** (Ctrl+P) opens the system print dialog. Direct PDF export uses
-WebKitGTK and works on Linux; on macOS and Windows, use Print and choose "Save as PDF". Agents can get the exact
+**Export PDF** (Ctrl+Shift+S) asks where to save and writes an A4 PDF with real, selectable text. It's the only
+time ResuFlow asks you for a location. Direct PDF export uses WebKitGTK and works on Linux. Agents can get the exact
 same page as HTML with `render_resume`.
 
 ## Develop
