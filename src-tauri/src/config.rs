@@ -11,10 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn data_dir() -> PathBuf {
-    dirs::data_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("resuflow")
+    dirs::data_dir().or_else(dirs::home_dir).unwrap_or_else(|| PathBuf::from(".")).join("resuflow")
 }
 
 pub fn resolve(explicit: Option<PathBuf>) -> PathBuf {
@@ -23,16 +20,16 @@ pub fn resolve(explicit: Option<PathBuf>) -> PathBuf {
         .unwrap_or_else(data_dir)
 }
 
-/// Open the data folder, creating it on first run. On that first run, copies (never moves)
+/// Open the data folder, creating it on first run. That first run copies (never moves)
 /// resumes, profile and instructions from the previous default location, `~/Documents/ResuFlow`.
 pub fn workspace(explicit: Option<PathBuf>) -> Result<Workspace> {
-    let dir = resolve(explicit.clone());
-    if explicit.is_none() && !dir.exists() {
-        if let Some(legacy) = dirs::document_dir().or_else(|| dirs::home_dir().map(|h| h.join("Documents"))).map(|d| d.join("ResuFlow")) {
-            if Workspace::is_workspace(&legacy) {
-                if let Err(e) = import(&legacy, &dir) {
-                    eprintln!("resuflow: could not import {}: {e}", legacy.display());
-                }
+    let overridden = explicit.is_some() || std::env::var_os("RESUFLOW_DIR").is_some_and(|v| !v.is_empty());
+    let dir = resolve(explicit);
+    if !overridden && !dir.exists() {
+        let legacy = dirs::document_dir().or_else(|| dirs::home_dir().map(|h| h.join("Documents"))).map(|d| d.join("ResuFlow"));
+        if let Some(legacy) = legacy.filter(|l| Workspace::is_workspace(l)) {
+            if let Err(e) = import(&legacy, &dir) {
+                eprintln!("resuflow: could not import {}: {e}", legacy.display());
             }
         }
     }

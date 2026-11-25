@@ -1,16 +1,17 @@
-//! Minimal front matter for Markdown files.
-//!
-//! Supported syntax (a deliberately small YAML subset):
+//! Front matter for Markdown files: a deliberately tiny YAML subset.
 //!
 //! ```text
 //! ---
 //! title: Senior Backend Engineer
-//! tags: [rust, backend]
+//! tags: [rust, "payments, billing"]
 //! ---
 //! body...
 //! ```
 //!
-//! Values are strings or `[a, b]` lists. Key order is preserved on write.
+//! A value is a single-line string or a `[a, b]` list. Keys keep their order on write, and
+//! comments and blank lines inside the fence are dropped.
+
+use std::fmt;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Doc {
@@ -27,36 +28,34 @@ pub enum Value {
 impl Doc {
     pub fn parse(src: &str) -> Doc {
         let src = src.strip_prefix('\u{feff}').unwrap_or(src);
-        let Some(rest) = src
-            .strip_prefix("---\n")
-            .or_else(|| src.strip_prefix("---\r\n"))
-        else {
-            return Doc { meta: vec![], body: src.to_string() };
+        let plain = || Doc { meta: vec![], body: src.to_string() };
+        let Some(rest) = src.strip_prefix("---\n").or_else(|| src.strip_prefix("---\r\n")) else {
+            return plain();
         };
         let mut meta = Vec::new();
-        let mut offset = 0;
+        let mut consumed = 0;
         for line in rest.split_inclusive('\n') {
-            offset += line.len();
-            let l = line.trim_end_matches(['\r', '\n']);
-            if l.trim() == "---" {
-                let body = rest[offset..].trim_start_matches(['\r', '\n']).to_string();
+            consumed += line.len();
+            let l = line.trim();
+            if l == "---" {
+                let body = rest[consumed..].trim_start_matches(['\r', '\n']).to_string();
                 return Doc { meta, body };
             }
-            if l.trim().is_empty() || l.trim_start().starts_with('#') {
+            if l.is_empty() || l.starts_with('#') {
                 continue;
             }
             if let Some((k, v)) = l.split_once(':') {
                 meta.push((k.trim().to_string(), parse_value(v.trim())));
             }
         }
-        // No closing fence: treat everything as body.
-        Doc { meta: vec![], body: src.to_string() }
+        plain() // no closing fence
     }
 
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.meta.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
+    /// A non-empty string value.
     pub fn str(&self, key: &str) -> Option<String> {
         match self.get(key)? {
             Value::Str(s) if !s.is_empty() => Some(s.clone()),
@@ -64,79 +63,108 @@ impl Doc {
         }
     }
 
+    /// A list value. A plain string is read as a comma-separated list.
     pub fn list(&self, key: &str) -> Vec<String> {
         match self.get(key) {
             Some(Value::List(l)) => l.clone(),
-            Some(Value::Str(s)) if !s.is_empty() => {
-                s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
-            }
-            _ => vec![],
+            Some(Value::Str(s)) => s.split(',').map(str::trim).filter(|x| !x.is_empty()).map(String::from).collect(),
+            None => vec![],
         }
     }
 
+    /// Set a field, or remove it when the value is empty. Newlines become spaces.
     pub fn set(&mut self, key: &str, value: Value) {
-        let empty = matches!(&value, Value::Str(s) if s.is_empty())
-            || matches!(&value, Value::List(l) if l.is_empty());
-        if let Some(i) = self.meta.iter().position(|(k, _)| k == key) {
-            if empty {
+        let one_line = |s: String| s.replace(['\r', '\n'], " ").trim().to_string();
+        let value = match value {
+            Value::Str(s) => Value::Str(one_line(s)),
+            Value::List(l) => Value::List(l.into_iter().map(one_line).filter(|x| !x.is_empty()).collect()),
+        };
+        let empty = match &value {
+            Value::Str(s) => s.is_empty(),
+            Value::List(l) => l.is_empty(),
+        };
+        let at = self.meta.iter().position(|(k, _)| k == key);
+        match (at, empty) {
+            (Some(i), true) => {
                 self.meta.remove(i);
-            } else {
-                self.meta[i].1 = value;
             }
-        } else if !empty {
-            self.meta.push((key.to_string(), value));
+            (Some(i), false) => self.meta[i].1 = value,
+            (None, false) => self.meta.push((key.to_string(), value)),
+            (None, true) => {}
         }
     }
+}
 
-    pub fn to_string(&self) -> String {
+impl fmt::Display for Doc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.meta.is_empty() {
-            return self.body.clone();
+            return f.write_str(&self.body);
         }
-        let mut out = String::from("---\n");
+        f.write_str("---\n")?;
         for (k, v) in &self.meta {
-            out.push_str(k);
-            out.push_str(": ");
             match v {
-                Value::Str(s) => out.push_str(&quote_if_needed(s)),
-                Value::List(l) => {
-                    out.push('[');
-                    out.push_str(&l.iter().map(|s| quote_if_needed(s)).collect::<Vec<_>>().join(", "));
-                    out.push(']');
-                }
+                Value::Str(s) => writeln!(f, "{k}: {}", quote(s))?,
+                Value::List(l) => writeln!(f, "{k}: [{}]", l.iter().map(|s| quote(s)).collect::<Vec<_>>().join(", "))?,
             }
-            out.push('\n');
         }
-        out.push_str("---\n\n");
-        out.push_str(self.body.trim_start_matches(['\r', '\n']));
-        out
+        write!(f, "---\n\n{}", self.body.trim_start_matches(['\r', '\n']))
     }
 }
 
 fn parse_value(v: &str) -> Value {
-    if let Some(inner) = v.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
-        return Value::List(
-            inner.split(',').map(|s| unquote(s.trim())).filter(|s| !s.is_empty()).collect(),
-        );
+    match v.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
+        Some(inner) => Value::List(split_list(inner).into_iter().map(|s| unquote(&s)).filter(|s| !s.is_empty()).collect()),
+        None => Value::Str(unquote(v)),
     }
-    Value::Str(unquote(v))
+}
+
+/// Split on commas that are not inside quotes.
+fn split_list(s: &str) -> Vec<String> {
+    let mut out = vec![String::new()];
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in s.chars() {
+        let cur = out.last_mut().unwrap();
+        match (quote, c) {
+            (Some('"'), _) if escaped => escaped = false,
+            (Some('"'), '\\') => escaped = true,
+            (Some(q), _) if c == q => quote = None,
+            (None, '"' | '\'') if cur.trim().is_empty() => quote = Some(c),
+            (None, ',') => {
+                out.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        out.last_mut().unwrap().push(c);
+    }
+    out.into_iter().map(|s| s.trim().to_string()).collect()
 }
 
 fn unquote(s: &str) -> String {
-    for q in ['"', '\''] {
-        if s.len() >= 2 && s.starts_with(q) && s.ends_with(q) {
-            return s[1..s.len() - 1].replace("\\\"", "\"");
+    let s = s.trim();
+    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+        let mut out = String::new();
+        let mut chars = s[1..s.len() - 1].chars();
+        while let Some(c) = chars.next() {
+            out.push(if c == '\\' { chars.next().unwrap_or('\\') } else { c });
         }
+        return out;
+    }
+    if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
+        return s[1..s.len() - 1].replace("''", "'");
     }
     s.to_string()
 }
 
-fn quote_if_needed(s: &str) -> String {
-    let risky = s.contains([',', '[', ']', '#', '"', '\''])
-        || s.starts_with(' ')
-        || s.ends_with(' ')
-        || s.contains(": ");
+fn quote(s: &str) -> String {
+    let risky = s.contains([',', '[', ']', '#', '"', '\'', '\\'])
+        || s.contains(": ")
+        || s.ends_with(':')
+        || s.starts_with(['-', '{', '&', '*', '!', '|', '>', '%', '@', '`', ' '])
+        || s.ends_with(' ');
     if risky {
-        format!("\"{}\"", s.replace('"', "\\\""))
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         s.to_string()
     }
@@ -148,25 +176,37 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let src = "---\ntitle: Backend, Rust\ntags: [a, b]\nstatus: draft\n---\n\n# Hi\n";
+        let src = "---\ntitle: Backend, Rust\ntags: [a, \"b, c\", 'd''s']\nstatus: draft\n---\n\n# Hi\n";
         let d = Doc::parse(src);
         assert_eq!(d.str("title").unwrap(), "Backend, Rust");
-        assert_eq!(d.list("tags"), vec!["a", "b"]);
+        assert_eq!(d.list("tags"), vec!["a", "b, c", "d's"]);
         assert_eq!(d.body, "# Hi\n");
+        assert_eq!(Doc::parse(&d.to_string()), d);
+    }
+
+    #[test]
+    fn escapes_survive() {
+        let mut d = Doc::default();
+        d.set("a", Value::Str(r#"say "hi" \o/"#.into()));
+        d.set("b", Value::Str("two\nlines".into()));
+        d.set("c", Value::Str("+91 98765 43210".into()));
         let again = Doc::parse(&d.to_string());
-        assert_eq!(again, d);
+        assert_eq!(again.str("a").unwrap(), r#"say "hi" \o/"#);
+        assert_eq!(again.str("b").unwrap(), "two lines");
+        assert_eq!(again.str("c").unwrap(), "+91 98765 43210");
     }
 
     #[test]
-    fn no_front_matter() {
-        let d = Doc::parse("# Plain\n");
-        assert!(d.meta.is_empty());
-        assert_eq!(d.body, "# Plain\n");
+    fn empty_value_removes_key() {
+        let mut d = Doc::parse("---\na: 1\nb: 2\n---\nx");
+        d.set("a", Value::Str(String::new()));
+        d.set("z", Value::List(vec![]));
+        assert_eq!(d.meta.len(), 1);
     }
 
     #[test]
-    fn unclosed_fence_is_body() {
-        let d = Doc::parse("---\ntitle: x\n# body");
-        assert!(d.meta.is_empty());
+    fn no_or_unclosed_front_matter_is_body() {
+        assert_eq!(Doc::parse("# Plain\n").body, "# Plain\n");
+        assert!(Doc::parse("---\ntitle: x\n# body").meta.is_empty());
     }
 }

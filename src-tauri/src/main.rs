@@ -21,9 +21,11 @@ Usage:
   resuflow mcp                     Run the MCP server on stdio (for AI agents)
   resuflow mcp-config              Print MCP client config for this install
   resuflow list                    List resumes
-  resuflow check SLUG              Run resume checks
+  resuflow check SLUG              Run resume checks (and keyword coverage, if it has a posting)
   resuflow render SLUG [-o FILE]   Render print-ready HTML
   resuflow pdf SLUG -o FILE        Save as PDF (Linux)
+  resuflow trash                   List deleted resumes
+  resuflow restore ID              Restore a deleted resume
   resuflow install-skills claude|agents   Copy built-in skills into an agent
   resuflow --help | --version
 
@@ -66,6 +68,9 @@ fn main() -> ExitCode {
                 let at = f.line.map(|l| format!("resume.md:{l}  ")).unwrap_or_default();
                 println!("{:<5}  {at}{}", f.level, f.message);
             }
+            if let Some(k) = &r.keywords {
+                println!("keywords {}% · missing: {}", k.coverage, if k.missing.is_empty() { "none".into() } else { k.missing.join(", ") });
+            }
             if r.findings.iter().any(|f| f.level == "error") { Err(String::new()) } else { Ok(()) }
         }),
         "render" => open(dir).and_then(|ws| {
@@ -83,6 +88,18 @@ fn main() -> ExitCode {
             (Some(slug), Some(file)) => app::export_pdf(dir, slug, PathBuf::from(file)),
             _ => Err("usage: resuflow pdf SLUG -o FILE".into()),
         },
+        "trash" => open(dir).and_then(|ws| {
+            for t in ws.list_trash().map_err(|e| e.0)? {
+                println!("{:<40} {}", t.id, t.title);
+            }
+            Ok(())
+        }),
+        "restore" => open(dir).and_then(|ws| {
+            let id = arg(1).ok_or("usage: resuflow restore ID (see `resuflow trash`)")?;
+            let r = ws.restore_resume(&id).map_err(|e| e.0)?;
+            println!("Restored {} as {}", r.summary.title, r.summary.slug);
+            Ok(())
+        }),
         "install-skills" => {
             match arg(1) {
                 Some(agent) => skills::install(&agent)

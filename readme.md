@@ -38,12 +38,22 @@ resuflow/
   profile.md                default template: front matter = printed header · body = copied into each new resume
   instructions.md           rules you write; agents read them and do not change them
   resumes/<slug>/resume.md  one folder per variant
-  .trash/                   deleted resumes land here; nothing is erased
+  resumes/<slug>/posting.md optional: the job posting that resume targets
+  .trash/                   deleted resumes land here and can be restored; nothing is erased
 ```
 
-In the app, a resume is one page with the same header fields as the default template (name, headline, email, phone, location, links). A new resume starts as a copy of that template, header and body. Title,
-status and tags live in the toolbar. On disk it's Markdown with a little front matter (new resumes start with
-just a title):
+In the app, a resume is one page that looks like the printout: the header (name, headline, email, phone,
+location, links) and the body edit in place. A new resume starts as a copy of the default template, or of another
+resume. Next to the page, a side panel shows:
+
+- **Review**: word count, quantified bullets, estimated pages and deterministic checks (weak openers, long
+  bullets, tables, leftovers from the template). Click a finding to jump to its line.
+- **Target job**: paste the posting a resume targets. ResuFlow picks out its key terms and shows which ones the
+  resume covers and which are missing. Your agent sees the same posting and coverage.
+- **Details**: tags, the file on disk, duplicate and move to trash (with Undo).
+
+**Preview** (Ctrl+E) shows the exact page that prints. On disk a resume is Markdown with a little front matter (new
+resumes start with just a title and the header fields):
 
 ```markdown
 ---
@@ -63,7 +73,7 @@ headline: Payments platform engineer   # optional; overrides profile.md
 
 ## Connect an agent
 
-In the app, open **Configuration → Connect an agent** (bottom of the sidebar) for a ready-to-copy config, or:
+In the app, open **Connect an agent** (bottom of the sidebar) for a ready-to-copy config, or:
 
 ```bash
 claude mcp add resuflow -- resuflow mcp        # Claude Code
@@ -73,19 +83,19 @@ claude mcp add resuflow -- resuflow mcp        # Claude Code
 { "mcpServers": { "resuflow": { "command": "resuflow", "args": ["mcp"] } } }
 ```
 
-The agent works on the same data folder as the app. The **Configuration** panel holds the default template, your instructions,
-the built-in skills and this connection. You edit instructions; the agent only reads them.
+The agent works on the same data folder as the app. The sidebar's workspace section holds the default template, your
+instructions, the built-in skills, this connection and the trash. You edit instructions; the agent only reads them.
 
 **Tools:** `get_workspace`, `read_profile`, `update_profile`, `read_instructions`, `list_resumes`,
-`read_resume`, `create_resume`, `write_resume`, `edit_resume`, `set_resume_meta`, `delete_resume`, `check_resume`,
-`render_resume`, `read_skill`.
+`read_resume`, `create_resume`, `write_resume`, `edit_resume`, `set_resume_meta`, `delete_resume`, `list_trash`,
+`restore_resume`, `read_posting`, `set_posting`, `check_resume`, `render_resume`, `read_skill`.
 
 ## Built-in skills
 
 ResuFlow ships four read-only writing skills: `role-research`, `impact-bullets`, `ats-pass` and `recruiter-review`.
 Agents load them over MCP (`read_skill`, or as MCP prompts). To give your agent its own copy, open
-**Configuration →** any skill **→ Install in Claude Code** (`~/.claude/skills`) or **Install in other**
-agents** (`~/.agents/skills`), or run `resuflow install-skills claude|agents`. They install as `resuflow-<name>`, so
+**Skills** in the sidebar and choose **Install in Claude Code** (`~/.claude/skills`) or **Install for other agents**
+(`~/.agents/skills`), or run `resuflow install-skills claude|agents`. They install as `resuflow-<name>`, so
 they never overwrite your own skills.
 
 ## Command line
@@ -96,6 +106,7 @@ resuflow mcp                           MCP server on stdio
 resuflow mcp-config                    print client config for this install
 resuflow list | check SLUG | render SLUG [-o FILE]
 resuflow pdf SLUG -o FILE              save as PDF (Linux)
+resuflow trash | restore ID            list deleted resumes, bring one back
 resuflow install-skills claude|agents  copy built-in skills into an agent
 ```
 
@@ -104,8 +115,21 @@ For development, `--dir DIR` or `$RESUFLOW_DIR` points any command at another fo
 ## PDF
 
 **Export PDF** (Ctrl+Shift+S) asks where to save and writes an A4 PDF with real, selectable text. It's the only
-time ResuFlow asks you for a location. Direct PDF export uses WebKitGTK and works on Linux. Agents can get the exact
-same page as HTML with `render_resume`.
+time ResuFlow asks you for a location. Direct PDF export uses WebKitGTK and works on Linux; elsewhere, **Print**
+(Ctrl+P) opens the system print dialog, where you can save as PDF. Agents can get the exact same page as HTML with
+`render_resume`.
+
+## Keyboard
+
+| Keys | Action |
+| --- | --- |
+| Ctrl+N | New resume |
+| Ctrl+K | Search resumes (↑ ↓ Enter to open) |
+| Ctrl+E | Switch between editing and the print preview |
+| Ctrl+\\ | Show or hide the side panel |
+| Ctrl+S | Save now (everything also saves as you type) |
+| Ctrl+P · Ctrl+Shift+S | Print · Export PDF |
+| Ctrl+B · Ctrl+I | Bold · italic in the editor |
 
 ## Develop
 
@@ -123,8 +147,10 @@ To use the release binary everywhere, put it on your PATH, for example
 `ln -s "$PWD/src-tauri/target/release/resuflow" ~/.local/bin/resuflow`.
 
 Layout: `src-tauri/src/` holds the Rust core (`workspace`, `doc`, `render`, `lint`, `skills`), the MCP server (`mcp`), the
-desktop shell (`app`) and the CLI (`main`). `web/` holds the UI: vanilla TypeScript plus CodeMirror 6 for the live-preview
-editor (`livemd.ts`). `skills/` holds the built-in skills, which are compiled into the binary.
+desktop shell (`app`) and the CLI (`main`). `web/src/` holds the UI in vanilla TypeScript: `main.ts` (sidebar, routing,
+live reload), `resume.ts` (the resume page and side panel), `views.ts` (template, instructions, skills, connect, trash),
+`livemd.ts` (the CodeMirror 6 live-preview editor) and `ui.ts` (helpers, toasts, hash-guarded autosave). `skills/` holds
+the built-in skills, which are compiled into the binary.
 
 ## License
 

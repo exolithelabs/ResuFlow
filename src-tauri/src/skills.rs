@@ -2,6 +2,7 @@
 //! over MCP (tools and prompts), or the user installs copies into an agent's own skills folder.
 
 use crate::doc::{Doc, Value};
+use crate::workspace::atomic_write;
 use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
@@ -60,7 +61,7 @@ pub fn install(agent: &str) -> Result<PathBuf, String> {
         doc.body.push_str(
             "\n---\n*Installed by ResuFlow. Needs the `resuflow` MCP server connected to read and edit resumes.*\n",
         );
-        fs::write(dir.join("SKILL.md"), doc.to_string()).map_err(|e| e.to_string())?;
+        atomic_write(&dir.join("SKILL.md"), &doc.to_string()).map_err(|e| e.0)?;
     }
     Ok(root)
 }
