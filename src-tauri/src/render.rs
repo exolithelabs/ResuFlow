@@ -15,7 +15,7 @@
 
 use crate::doc::Doc;
 use crate::workspace::{atomic_write, Result, Workspace};
-use pulldown_cmark::{html, CowStr, Event, Options, Parser, TagEnd};
+use pulldown_cmark::{html, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::path::PathBuf;
 
 const CSS: &str = include_str!("resume.css");
@@ -421,6 +421,301 @@ pub fn esc(s: &str) -> String {
     o
 }
 
+// ---- one page ----------------------------------------------------------------
+
+/// Points per millimetre.
+const MM: f64 = 72.0 / 25.4;
+/// The box a resume prints into: A4 (210 × 297mm) less resume.css's 16mm and 14mm margins, in pt.
+const PAGE_WIDTH: f64 = 178.0 * MM;
+const PAGE_HEIGHT: f64 = 269.0 * MM;
+/// Body type, as resume.css sets it: 10.5pt on a 1.42 line.
+const BODY: f64 = 10.5;
+const LEADING: f64 = 1.42;
+/// Inter, the font resume.css asks for first, sets about 6% wider than the Helvetica widths below
+/// (Arial and Liberation Sans match them). Measuring as Inter means a resume that fits here
+/// prints on one page whichever of these fonts a machine has.
+const FONT_SCALE: f64 = 1.06;
+
+/// How much of one A4 page a resume fills when printed: 1.0 is exactly full, more runs onto a
+/// second page. Estimated from resume.css's type and spacing and per-character widths, without a
+/// browser, so every writer (the app, agents through MCP) is held to the same page.
+pub fn page_fill(resume: &Doc) -> f64 {
+    let mut w = Walker::default();
+    match split_header(&resume.body) {
+        Some(h) => {
+            // The header prints as an h1 and plain lines, spaced as `header` in resume.css.
+            w.walk(&format!("# {}", h.name), (2.0, 4.0));
+            for l in h.headline.iter().chain(&h.contact) {
+                w.walk(l, (2.0, 0.0));
+            }
+            w.page.margin(8.0);
+            w.walk(h.rest, (2.0, 4.0));
+        }
+        None => w.walk(&resume.body, (2.0, 4.0)),
+    }
+    w.page.y / PAGE_HEIGHT
+}
+
+/// Blocks stacked down the page, with CSS margin collapsing: adjoining margins merge into the
+/// largest (less the most negative), and the first block's top margin is dropped.
+#[derive(Default)]
+struct Stack {
+    y: f64,
+    pos: f64,
+    neg: f64,
+    started: bool,
+}
+
+impl Stack {
+    fn margin(&mut self, m: f64) {
+        if m >= 0.0 {
+            self.pos = self.pos.max(m);
+        } else {
+            self.neg = self.neg.min(m);
+        }
+    }
+
+    fn content(&mut self, h: f64) {
+        if self.started {
+            self.y += self.pos + self.neg;
+        }
+        self.started = true;
+        (self.pos, self.neg) = (0.0, 0.0);
+        self.y += h;
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Face {
+    Regular,
+    Bold,
+    Mono,
+}
+
+#[derive(Default)]
+struct Walker {
+    page: Stack,
+    /// Text of the block being read, with the face of each character; '\n' is a hard break.
+    text: Vec<(char, Face)>,
+    bold: usize,
+    /// Left indent of lists and quotes, in pt.
+    indent: Vec<f64>,
+    after_h2: bool,
+    /// The open table: its column count, whether in the head row, and the row's tallest cell.
+    table: Option<(usize, bool, f64)>,
+}
+
+impl Walker {
+    /// Lay out a run of Markdown. `para` is a paragraph's top and bottom margin.
+    fn walk(&mut self, src: &str, para: (f64, f64)) {
+        let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_SMART_PUNCTUATION;
+        for e in Parser::new_ext(&isolate_rules(src), opts) {
+            match e {
+                Event::Start(Tag::Paragraph) => self.page.margin(para.0),
+                Event::End(TagEnd::Paragraph) => {
+                    self.flush(BODY, LEADING);
+                    self.page.margin(para.1);
+                }
+                Event::Start(Tag::Heading { level, .. }) => {
+                    self.page.margin(heading(level).1);
+                    self.bold += 1;
+                }
+                Event::End(TagEnd::Heading(level)) => {
+                    let (size, _, bottom) = heading(level);
+                    self.bold -= 1;
+                    self.flush(size, 1.3);
+                    self.page.margin(bottom);
+                    self.after_h2 = level == HeadingLevel::H2;
+                    continue;
+                }
+                Event::Start(Tag::List(_)) => {
+                    self.flush(BODY, LEADING);
+                    self.page.margin(2.0);
+                    self.indent.push(13.0);
+                }
+                Event::End(TagEnd::List(_)) => {
+                    self.indent.pop();
+                    self.page.margin(4.0);
+                }
+                Event::Start(Tag::Item) => self.page.margin(1.0),
+                Event::End(TagEnd::Item) => {
+                    self.flush(BODY, LEADING);
+                    self.page.margin(1.0);
+                }
+                Event::Start(Tag::BlockQuote(_)) => {
+                    self.page.margin(BODY);
+                    self.indent.push(60.0);
+                }
+                Event::End(TagEnd::BlockQuote(_)) => {
+                    self.indent.pop();
+                    self.page.margin(BODY);
+                }
+                Event::Start(Tag::CodeBlock(_)) => self.page.margin(BODY),
+                Event::End(TagEnd::CodeBlock) => {
+                    // Preformatted: one printed line per source line, never wrapped.
+                    let lines = self.text.iter().filter(|(c, _)| *c == '\n').count().max(1);
+                    self.text.clear();
+                    self.page.content(lines as f64 * BODY * LEADING);
+                    self.page.margin(BODY);
+                }
+                Event::Start(Tag::Table(cols)) => self.table = Some((cols.len().max(1), false, 0.0)),
+                Event::End(TagEnd::Table) => self.table = None,
+                Event::Start(Tag::TableHead) => self.row(true),
+                Event::Start(Tag::TableRow) => self.row(false),
+                Event::End(TagEnd::TableHead | TagEnd::TableRow) => {
+                    if let Some((_, _, tallest)) = self.table.as_mut() {
+                        let h = std::mem::take(tallest);
+                        self.page.content(h + 4.0 + 0.75); // 2pt padding above and below, 1px rule
+                    }
+                }
+                Event::End(TagEnd::TableCell) => {
+                    if let Some((cols, head, tallest)) = self.table {
+                        let width = (self.width() / cols as f64 - 8.0).max(BODY);
+                        let size = 9.5;
+                        if head {
+                            self.text.iter_mut().for_each(|(_, f)| *f = if *f == Face::Mono { Face::Mono } else { Face::Bold });
+                        }
+                        let h = lines(&std::mem::take(&mut self.text), size, width) as f64 * size * LEADING;
+                        self.table = Some((cols, head, tallest.max(h)));
+                    }
+                }
+                Event::Start(Tag::Strong) => self.bold += 1,
+                Event::End(TagEnd::Strong) => self.bold -= 1,
+                Event::Text(t) => self.push(&t, None),
+                Event::Code(t) => self.push(&t, Some(Face::Mono)),
+                Event::SoftBreak => self.push(" ", None),
+                Event::HardBreak => self.push("\n", None),
+                Event::Rule => self.rule(),
+                Event::Html(h) | Event::InlineHtml(h) => match component(&h) {
+                    Some(Component::Rule(_)) => self.rule(),
+                    Some(_) => {}
+                    None => self.push(&h, None),
+                },
+                _ => {}
+            }
+            self.after_h2 = false;
+        }
+        self.flush(BODY, LEADING);
+    }
+
+    fn width(&self) -> f64 {
+        PAGE_WIDTH - self.indent.iter().sum::<f64>()
+    }
+
+    fn push(&mut self, s: &str, face: Option<Face>) {
+        let face = face.unwrap_or(if self.bold > 0 { Face::Bold } else { Face::Regular });
+        self.text.extend(s.chars().map(|c| (c, face)));
+    }
+
+    fn row(&mut self, head: bool) {
+        if let Some(t) = self.table.as_mut() {
+            t.1 = head;
+        }
+    }
+
+    /// Print the text read so far as lines of `size` type.
+    fn flush(&mut self, size: f64, leading: f64) {
+        if self.table.is_some() {
+            return;
+        }
+        let n = lines(&std::mem::take(&mut self.text), size, self.width());
+        if n > 0 {
+            self.page.content(n as f64 * size * leading);
+        }
+    }
+
+    /// An `<hr>`: a 1px rule, pulled up tight under a section heading.
+    fn rule(&mut self) {
+        self.flush(BODY, LEADING);
+        let (top, bottom) = if self.after_h2 { (-3.0, 5.0) } else { (8.0, 8.0) };
+        self.page.margin(top);
+        self.page.content(0.75);
+        self.page.margin(bottom);
+    }
+}
+
+/// A heading's size, top and bottom margin, from resume.css.
+fn heading(level: HeadingLevel) -> (f64, f64, f64) {
+    match level {
+        HeadingLevel::H1 => (20.0, 8.0, 2.0),
+        HeadingLevel::H2 => (14.0, 12.0, 4.0),
+        HeadingLevel::H3 => (12.0, 8.0, 2.0),
+        HeadingLevel::H4 => (11.0, 6.0, 1.0),
+        _ => (10.5, 5.0, 1.0),
+    }
+}
+
+/// How many lines `text` wraps to in `width` pt of `size` type, breaking between words.
+fn lines(text: &[(char, Face)], size: f64, width: f64) -> usize {
+    let (mut n, mut line, mut word, mut space) = (0usize, 0.0f64, 0.0f64, 0.0f64);
+    let place = |line: &mut f64, word: f64, space: f64, n: &mut usize| {
+        if *n == 0 {
+            *n = 1;
+        }
+        if *line > 0.0 && *line + space + word > width {
+            *n += 1;
+            *line = word;
+        } else if *line > 0.0 {
+            *line += space + word;
+        } else {
+            *line = word;
+        }
+    };
+    for &(c, face) in text {
+        if c == '\n' {
+            place(&mut line, word, space, &mut n);
+            n = n.max(1) + 1;
+            (line, word, space) = (0.0, 0.0, 0.0);
+        } else if c.is_whitespace() {
+            if word > 0.0 {
+                place(&mut line, word, space, &mut n);
+                (word, space) = (0.0, 0.0);
+            }
+            if line > 0.0 {
+                space += char_width(' ', face, size);
+            }
+        } else {
+            word += char_width(c, face, size);
+        }
+    }
+    if word > 0.0 {
+        place(&mut line, word, space, &mut n);
+    }
+    n
+}
+
+fn char_width(c: char, face: Face, size: f64) -> f64 {
+    if face == Face::Mono {
+        return 0.6 * 9.0; // code is 9pt monospace
+    }
+    // Helvetica's advance widths in 1/1000 em, for ASCII from the space to '~': regular, then bold.
+    const REGULAR: [u16; 95] = [
+        278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556, 556, 556, 556,
+        556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667,
+        556, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556, 333, 556,
+        556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722,
+        500, 500, 500, 334, 260, 334, 584,
+    ];
+    const BOLD: [u16; 95] = [
+        278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556, 556, 556, 556,
+        556, 556, 556, 556, 333, 333, 584, 584, 584, 611, 975, 722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722,
+        611, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 333, 278, 333, 584, 556, 333, 556,
+        611, 556, 611, 556, 333, 611, 611, 278, 278, 556, 278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556, 778,
+        556, 556, 500, 389, 280, 389, 584,
+    ];
+    let bold = face == Face::Bold;
+    let em = match c {
+        ' '..='~' => (if bold { BOLD } else { REGULAR })[c as usize - 32] as f64,
+        '·' | '‘' | '’' | '•' => 333.0,
+        '“' | '”' => 444.0,
+        '—' | '…' => 1000.0,
+        c if c >= '\u{2e80}' => 1000.0, // CJK and other full-width text
+        _ if bold => 611.0,
+        _ => 556.0,
+    };
+    em / 1000.0 * size * FONT_SCALE
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +786,21 @@ mod tests {
         let src = "---\ntitle: T\n---\n# <Text color=\"#1f4e8c\" caps>**Ada** Lovelace</Text>\nEngineer\n";
         assert!(render_doc(&Doc::parse(src)).contains("<title>Ada Lovelace</title>"));
         assert_eq!(plain_text(split_header("# <Text size=\"20pt\"></Text>\n").unwrap().name), "");
+    }
+
+    #[test]
+    fn page_fill_follows_the_layout() {
+        let fill = |body: &str| page_fill(&Doc { meta: vec![], body: body.into() });
+        let template = fill(crate::workspace::RESUME_TEMPLATE);
+        assert!((0.4..0.5).contains(&template), "{template}"); // Chromium lays it out at 345pt of 762
+        let bullet = "- Shipped the ledger migration, cutting settlement latency by 42% across every payment rail we ran\n";
+        assert!(fill(&format!("# Ada\n\n## Experience\n{}", bullet.repeat(20))) < 1.0);
+        assert!(fill(&format!("# Ada\n\n## Experience\n{}", bullet.repeat(60))) > 1.0);
+        // Wrapping: one bullet twice as long takes two lines; bold sets wider than regular.
+        let one = fill(bullet);
+        assert!(fill(&format!("- {} {}", &bullet[2..bullet.len() - 1], &bullet[2..])) > one * 1.9);
+        assert!(lines(&"word ".repeat(20).chars().map(|c| (c, Face::Bold)).collect::<Vec<_>>(), BODY, 85.0)
+            > lines(&"word ".repeat(20).chars().map(|c| (c, Face::Regular)).collect::<Vec<_>>(), BODY, 85.0));
     }
 
     #[test]

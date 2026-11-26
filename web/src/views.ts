@@ -29,6 +29,7 @@ export class TemplateView implements View {
     parent: $("template-editor"),
     placeholder: "What every new resume starts with: # your name, a headline and contact line, then your usual sections.",
     header: true,
+    onePage: true,
     onChange: () => this.save.touch(),
   });
 

@@ -74,10 +74,11 @@ Opening a folder from an older version converts it in place, after taking a back
 `instructions.md` becomes `instructions.json` and each `posting.md` becomes `posting.txt`. `resuflow.json` records
 the folder's data format.
 
-In the app, a resume is one page of Markdown that looks like the printout. All of it edits in place, Obsidian-style,
+In the app, a resume is one A4 page of Markdown that looks like the printout: the page has no room to write past its
+bottom. All of it edits in place, Obsidian-style,
 header and section rules included: formatting renders as you type, and the raw Markdown (`#`, `**`, `---`) shows
 on the line the cursor is on. Right-click for a formatting menu. A new resume starts as a copy of the default
-template, or of another resume. Next to the page, a side panel shows:
+template (itself one A4 page, edited the same way), or of another resume. Next to the page, a side panel shows:
 
 - **Review**: word count, quantified bullets, estimated pages and deterministic checks (weak openers, long
   bullets, tables, leftovers from the template). Click a finding to jump to its line.
@@ -154,7 +155,9 @@ scoped to resume work, and `get_workspace` returns the current ones.
 **Tools:** `get_workspace`, `read_profile`, `update_profile`, `list_resumes`, `read_resume`, `create_resume`,
 `write_resume`, `edit_resume`, `set_resume_meta`, `archive_resume`, `restore_resume`, `read_posting`,
 `set_posting`, `check_resume`, `render_resume`, `read_skill`. Agents can archive and restore resumes but never delete
-them; only you can, in the app.
+them; only you can, in the app. Agents are held to one page too: `create_resume`, `write_resume`, `edit_resume` and
+`update_profile` refuse a resume, or a default template, that would print past one A4 page, estimated from the
+stylesheet's type and spacing as set in Inter. One that is already longer can only get shorter.
 
 **Resources** (read-only Markdown): `resuflow://profile`, `resuflow://instructions`, `resuflow://resumes/{slug}` and
 `skill://{name}/SKILL.md`.

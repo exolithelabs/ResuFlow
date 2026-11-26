@@ -6,7 +6,7 @@
 // the header included, is this one text: Markdown plus the two MDX styling components that
 // render.rs prints, <Text color underline underlineColor size caps spacing font>…</Text> and <Rule color />.
 
-import { Compartment, EditorSelection, EditorState, Transaction, type Extension, type Range, type Text } from "@codemirror/state";
+import { ChangeSet, Compartment, EditorSelection, EditorState, Transaction, type Extension, type Range, type Text } from "@codemirror/state";
 import {
   Decoration, EditorView, ViewPlugin, WidgetType, keymap, placeholder as placeholderExt,
   type Command, type DecorationSet, type ViewUpdate,
@@ -755,6 +755,74 @@ export function formatAt(state: EditorState) {
   };
 }
 
+// ---------------------------------------------------------------- one page: the resume sheet holds no more than A4
+
+/**
+ * Keep the text inside its `.page`'s content box: an edit that runs the text past the bottom is
+ * taken back (outside the undo history), so the page has no room to write past. Text already past
+ * it, written outside the editor, stays editable as long as an edit doesn't push it further.
+ */
+function fitToPage(): Extension {
+  return ViewPlugin.fromClass(
+    class {
+      /** How far the text ran past the page, in px, at the last measurement. */
+      over = 0;
+      /** The edits since then, and how to take them back. */
+      pending: { undo: ChangeSet; selection: EditorSelection } | null = null;
+
+      constructor(readonly view: EditorView) {
+        this.measure();
+      }
+
+      update(u: ViewUpdate) {
+        if (u.docChanged) {
+          const guarded = u.transactions.every(
+            (t) => !t.docChanged || (t.annotation(Transaction.addToHistory) !== false && !t.isUserEvent("undo") && !t.isUserEvent("redo")),
+          );
+          const undo = u.changes.invert(u.startState.doc);
+          this.pending = !guarded
+            ? null
+            : this.pending
+              ? { undo: undo.compose(this.pending.undo), selection: this.pending.selection }
+              : { undo, selection: u.startState.selection };
+        }
+        if (u.docChanged || u.geometryChanged) this.measure();
+      }
+
+      measure() {
+        this.view.requestMeasure({
+          key: this,
+          read: (view) => {
+            const page = view.dom.closest<HTMLElement>(".page");
+            if (!page) return null;
+            const style = getComputedStyle(page);
+            const limit = page.getBoundingClientRect().bottom - parseFloat(style.paddingBottom);
+            // The laid-out text, not the height map, which can trail the edit just made.
+            const content = view.contentDOM;
+            const bottom = content.getBoundingClientRect().bottom - parseFloat(getComputedStyle(content).paddingBottom);
+            return { doc: view.state.doc, over: Math.max(0, bottom - limit) };
+          },
+          write: (m, view) => {
+            if (!m) return;
+            if (this.pending && m.over > 0.5 && m.over > this.over + 0.5) {
+              // Not from inside the measure cycle. If more was typed meanwhile, it joined `pending`
+              // and its own measurement takes it all back.
+              setTimeout(() => {
+                const p = this.pending;
+                if (!p || view.state.doc !== m.doc) return;
+                view.dispatch({ changes: p.undo, selection: p.selection, annotations: Transaction.addToHistory.of(false) });
+              });
+              return;
+            }
+            this.pending = null;
+            this.over = m.over;
+          },
+        });
+      }
+    },
+  );
+}
+
 export interface LiveEditor {
   view: EditorView;
   get(): string;
@@ -772,6 +840,8 @@ export function createLiveEditor(opts: {
   onChange?: (text: string) => void;
   /** The text opens with a resume header (`# Name` and the lines under it); see `headerLines`. */
   header?: boolean;
+  /** Keep the text to its one-page sheet (see `fitToPage`). */
+  onePage?: boolean;
 }): LiveEditor {
   const ro = new Compartment();
   let readOnly = false;
@@ -797,6 +867,7 @@ export function createLiveEditor(opts: {
     placeholderExt(opts.placeholder ?? ""),
     livePreview(() => !readOnly, !!opts.header),
     ro.of(readOnlyExt()),
+    opts.onePage ? fitToPage() : [],
     EditorView.updateListener.of((u) => {
       if (u.docChanged && !silent) opts.onChange?.(u.state.doc.toString());
     }),

@@ -37,6 +37,9 @@ Two components add styling, nothing else is MDX: <Text color=\"#1f4e8c\" size=\"
 (attributes: color, underline, underlineColor, size, caps, spacing, font=serif|sans|mono) and <Rule color=\"#d6d9de\" /> \
 on its own line for a coloured rule. Attributes are quoted strings or bare booleans; colours are hex, CSS names or rgb()/hsl(), \
 sizes are lengths such as 9.5pt or 0.08em. Keep the styling a resume already has when you edit it. No imports, exports or {expressions}. \
+A resume is one A4 page, and so is the default template: create_resume, write_resume, edit_resume and update_profile \
+refuse anything that would print longer, \
+so choose what to cut (check_resume's est_pages shows how full the page is). \
 A resume can have a target job posting (read_posting / set_posting); check_resume then reports which of its key terms the resume covers. \
 Prefer edit_resume for targeted changes and pass the expected_hash from your last read, so you never overwrite the user's \
 concurrent edits in the desktop app. Run check_resume after editing. \
@@ -349,12 +352,12 @@ fn tools() -> Vec<Value> {
     vec![
         tool("get_workspace", "Overview: data folder, template name and headline, the user's instructions, all resumes, skills. Call first.", json!({}), &[], Read),
         tool("read_profile", "Read the default template (profile.mdx): the source, header included, that each new resume starts as.", json!({}), &[], Read),
-        tool("update_profile", "Replace the default template (profile.mdx) entirely.", json!({ "content": text, "expected_hash": hash }), &["content"], Write),
+        tool("update_profile", "Replace the default template (profile.mdx) entirely. Refused if it would print longer than one A4 page.", json!({ "content": text, "expected_hash": hash }), &["content"], Write),
         tool("list_resumes", "List resumes, most recently edited first, optionally filtered by status or tag.", json!({ "status": status, "tag": text }), &[], Read),
         tool("read_resume", "Read a resume's full Markdown source, metadata and hash.", json!({ "slug": slug }), &["slug"], Read),
-        tool("create_resume", "Create a resume. Use `from` to copy an existing one (the usual way to tailor a variant; its posting is copied too), or `content` for full Markdown. Without either it starts from the default template. The slug is derived from the title if omitted.", json!({ "title": text, "slug": slug, "from": { "type": "string", "description": "Slug to copy" }, "content": text, "tags": tags }), &["title"], Write),
-        tool("write_resume", "Replace a resume's full source (front matter and body). Prefer edit_resume for partial changes.", json!({ "slug": slug, "content": text, "expected_hash": hash }), &["slug", "content"], Write),
-        tool("edit_resume", "Replace one exact, unique occurrence of old_text with new_text in a resume's source.", json!({ "slug": slug, "old_text": text, "new_text": text, "expected_hash": hash }), &["slug", "old_text", "new_text"], Write),
+        tool("create_resume", "Create a resume. Use `from` to copy an existing one (the usual way to tailor a variant; its posting is copied too), or `content` for full Markdown. Without either it starts from the default template. New `content` must fit on one A4 page. The slug is derived from the title if omitted.", json!({ "title": text, "slug": slug, "from": { "type": "string", "description": "Slug to copy" }, "content": text, "tags": tags }), &["title"], Write),
+        tool("write_resume", "Replace a resume's full source (front matter and body). Refused if it would print longer than one A4 page. Prefer edit_resume for partial changes.", json!({ "slug": slug, "content": text, "expected_hash": hash }), &["slug", "content"], Write),
+        tool("edit_resume", "Replace one exact, unique occurrence of old_text with new_text in a resume's source. Refused if the result would print longer than one A4 page.", json!({ "slug": slug, "old_text": text, "new_text": text, "expected_hash": hash }), &["slug", "old_text", "new_text"], Write),
         tool("set_resume_meta", "Change a resume's title, status or tags.", json!({ "slug": slug, "title": text, "status": status, "tags": tags, "expected_hash": hash }), &["slug"], Write),
         tool("archive_resume", "Archive a resume: it moves to the user's Archive and keeps every file. Undo with restore_resume. Resumes can't be deleted over MCP; only the user can do that in the app.", json!({ "slug": slug }), &["slug"], Write),
         tool("restore_resume", "Bring an archived resume back as a draft. list_resumes with status=archived shows the archive.", json!({ "slug": slug }), &["slug"], Write),
@@ -391,6 +394,13 @@ mod tests {
         assert_eq!(r["isError"], false);
         let r = call(&s, "edit_resume", json!({ "slug": "platform-engineer", "old_text": "- Tools: Kafka", "new_text": "x", "expected_hash": hash }));
         assert_eq!(r["isError"], true);
+        let long = "- Shipped the ledger migration, cutting settlement latency by 42% across payment rails\n".repeat(60);
+        let r = call(&s, "edit_resume", json!({ "slug": "platform-engineer", "old_text": "- Tools: Kafka", "new_text": long }));
+        assert_eq!(r["isError"], true);
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("one A4 page"));
+        let r = call(&s, "update_profile", json!({ "content": format!("# Ada\n\n## Experience\n{long}") }));
+        assert_eq!(r["isError"], true);
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("default template"));
 
         call(&s, "set_posting", json!({ "slug": "platform-engineer", "content": "We use Kafka and Terraform. Kafka at scale." }));
         let r = call(&s, "check_resume", json!({ "slug": "platform-engineer" }));

@@ -53,6 +53,7 @@ export class ResumeView implements View {
     parent: $("editor-host"),
     placeholder: "# Your name, then a headline line and a contact line. ## starts a section, ### a role, - a bullet.",
     header: true,
+    onePage: true,
     onChange: (text) => {
       $("stat-words").textContent = String(wordCount(stripComponents(text)));
       this.save.touch();

@@ -489,11 +489,19 @@ impl Workspace {
         if path.parent().is_some_and(Path::exists) {
             bail!("a resume named '{slug}' already exists");
         }
-        let mut doc = match (new.content, new.from) {
-            (Some(c), _) => Doc::parse(c),
-            (None, Some(src)) => Doc::parse(&self.read_resume(src)?.content),
-            (None, None) => Doc { meta: vec![], body: self.template_body() },
+        // A copy may be as long as what it copies; new content must fit one page.
+        let (mut doc, copied) = match (new.content, new.from) {
+            (Some(c), _) => (Doc::parse(c), None),
+            (None, Some(src)) => {
+                let src = Doc::parse(&self.read_resume(src)?.content);
+                (src.clone(), Some(src))
+            }
+            (None, None) => {
+                let template = Doc { meta: vec![], body: self.template_body() };
+                (template.clone(), Some(template))
+            }
         };
+        check_page(&format!("resume '{slug}'"), &doc, copied.as_ref())?;
         doc.set("title", Value::Str(title.into()));
         if new.from.is_some() {
             doc.set("status", Value::Str(String::new())); // a copy starts over as a draft
@@ -519,6 +527,8 @@ impl Workspace {
             bail!("no resume named '{slug}' (use create_resume)");
         }
         self.guard(&path, expected_hash)?;
+        let before = Doc::parse(&fs::read_to_string(&path)?);
+        check_page(&format!("resume '{slug}'"), &Doc::parse(content), Some(&before))?;
         atomic_write(&path, content)?;
         self.read_resume(slug)
     }
@@ -669,6 +679,7 @@ impl Workspace {
 
     pub fn write_profile(&self, content: &str, expected_hash: Option<&str>) -> Result<TextFile> {
         self.guard(&self.profile_path(), expected_hash)?;
+        check_page("the default template", &Doc::parse(content), Some(&self.profile()))?;
         atomic_write(&self.profile_path(), content)?;
         self.read_profile()
     }
@@ -748,7 +759,9 @@ impl Workspace {
         })
     }
 
-    /// Replace the body, keeping the front matter as it is on disk.
+    /// Replace the body, keeping the front matter as it is on disk. The app's editor saves through
+    /// this and holds the text to one page itself, measuring the real layout, so the estimate in
+    /// [`check_page`] isn't applied here: it must never refuse text the editor shows fitting.
     pub fn write_body(&self, t: &Target, body: &str, expected_hash: Option<&str>) -> Result<Parts> {
         let path = self.target_path(t)?;
         self.guard(&path, expected_hash)?;
@@ -891,6 +904,31 @@ fn rule_sections(body: &str) -> String {
 
 fn title_of(d: &Doc, slug: &str) -> String {
     d.str("title").unwrap_or_else(|| slug.to_string())
+}
+
+/// A resume, and the default template each one starts from, is one A4 page. Refuse `doc` (`what`
+/// names it) if it would print past one, unless it runs no further past than `before` (the version
+/// it replaces or copies), so one that is already long stays editable while it shrinks.
+fn check_page(what: &str, doc: &Doc, before: Option<&Doc>) -> Result<()> {
+    let fill = crate::render::page_fill(doc);
+    let limit = before.map_or(1.0, |b| crate::render::page_fill(b).max(1.0));
+    if fill <= limit + 1e-6 {
+        return Ok(());
+    }
+    let pct = |f: f64| (f * 100.0).ceil();
+    if limit > 1.0 {
+        bail!(
+            "{what} is already longer than one A4 page ({}%), and this would make it longer ({}%). \
+             Shorten it to fit one page instead.",
+            pct(limit),
+            pct(fill)
+        );
+    }
+    bail!(
+        "{what} would run past one A4 page (about {}% of a page). It must fit on one page: \
+         cut or tighten it, then write it again.",
+        pct(fill)
+    )
 }
 
 pub fn count_words(text: &str) -> usize {
@@ -1089,6 +1127,41 @@ pub(crate) mod tests {
 
     fn create(ws: &Workspace, title: &str) -> ResumeFile {
         ws.create_resume(NewResume { title, ..Default::default() }).unwrap()
+    }
+
+    /// `n` bullets, each a line or two long: about 36 lines fill the page.
+    fn bullets(n: usize) -> String {
+        (0..n).map(|i| format!("- Shipped ledger migration {i}, cutting settlement latency by 42% across payment rails\n")).collect()
+    }
+
+    #[test]
+    fn resumes_stay_on_one_page() {
+        let t = TempWs::new();
+        let ws = &t.0;
+        let r = create(ws, "One Page");
+        let slug = &r.summary.slug;
+        let long = format!("# Ada\n\n## Experience\n{}", bullets(80));
+        let err = ws.write_resume(slug, &long, None).unwrap_err().0;
+        assert!(err.contains("past one A4 page"), "{err}");
+        assert!(ws.create_resume(NewResume { title: "Long", content: Some(&long), ..Default::default() }).is_err());
+        let fits = format!("# Ada\n\n## Experience\n{}", bullets(20));
+        let r = ws.write_resume(slug, &fits, None).unwrap();
+        assert!(ws.edit_resume(slug, "- Shipped ledger migration 0,", &bullets(60), Some(&r.hash)).is_err());
+
+        // A resume that is already long (written in the app or by hand) may shrink, never grow.
+        ws.write_body(&Target::Resume(slug.clone()), &long, None).unwrap();
+        ws.set_meta(slug, None, Some("ready"), None, None).unwrap();
+        let copy = ws.create_resume(NewResume { title: "Copy", from: Some(slug), ..Default::default() }).unwrap();
+        assert!(ws.edit_resume(&copy.summary.slug, "- Shipped ledger migration 1,", "- Shipped ledger migration 1, and more words to wrap the line well past its end and onto two,", None).is_err());
+        ws.edit_resume(slug, &bullets(80)[..200], "", None).unwrap();
+
+        // The default template is held to the same page.
+        assert!(ws.write_profile(&long, None).unwrap_err().0.contains("default template"));
+        ws.write_profile(&fits, None).unwrap();
+        ws.write_body(&Target::Profile, &long, None).unwrap(); // a long one from before the limit
+        assert!(ws.write_profile(&format!("{long}{}", bullets(1)), None).is_err());
+        ws.write_profile(&format!("# Ada\n\n## Experience\n{}", bullets(60)), None).unwrap();
+        create(ws, "From Template"); // copying the template is never refused
     }
 
     #[test]

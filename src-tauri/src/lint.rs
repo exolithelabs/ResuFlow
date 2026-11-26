@@ -3,7 +3,7 @@
 //! both use these as a fast, objective first pass.
 
 use crate::doc::Doc;
-use crate::render::{plain_text, split_header, strip_components};
+use crate::render::{page_fill, plain_text, split_header, strip_components};
 use crate::workspace::{count_words, Result, Workspace};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -38,8 +38,6 @@ pub struct Keywords {
     pub found: Vec<String>,
     pub missing: Vec<String>,
 }
-
-const WORDS_PER_PAGE: f64 = 520.0;
 
 const WEAK_OPENERS: [&str; 10] = [
     "responsible for", "worked on", "helped", "assisted", "involved in", "tasked with",
@@ -149,11 +147,13 @@ pub fn check_doc(content: &str, posting: Option<&str>) -> Report {
         add("warn", format!("Only {numbered} of {bullets} bullets have a number. Quantify impact where you can."), None);
     }
     let words = count_words(&resume.body);
-    let est_pages = ((words as f64 / WORDS_PER_PAGE) * 10.0).ceil() / 10.0;
+    let fill = page_fill(&resume);
+    let est_pages = (fill * 10.0).ceil() / 10.0;
     if words < 180 {
         add("info", format!("Short ({words} words). Most strong one-page resumes run 350–600."), None);
-    } else if words > 950 {
-        add("warn", format!("Long ({words} words, ~{est_pages:.1} pages). Trim to what this role needs."), None);
+    }
+    if fill > 1.0 {
+        add("warn", format!("Runs past one A4 page (~{est_pages:.1} pages). Cut it to one page."), None);
     }
 
     let keywords = posting.map(|p| coverage(&key_terms(p), &strip_components(content)));
