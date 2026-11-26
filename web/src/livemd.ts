@@ -32,31 +32,51 @@ const FONTS: Record<string, string> = {
   sans: '"Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif',
   mono: 'ui-monospace, "SF Mono", Menlo, monospace',
 };
-const OPEN_TAG = /^<([A-Za-z0-9]+)((?:\s*[A-Za-z0-9_-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*)\s*(\/?)>$/;
 const on = (v: string | undefined) => v !== undefined && v !== "false";
 
-/** A tag's attributes, first one winning; a bare attribute (`caps`) reads as "true". */
-function attrsOf(attrText: string) {
+/** An opening tag's name and attributes, first one winning; a bare attribute (`caps`) reads as "true" (render.rs `component`). */
+function parseTag(tag: string): { name: string; attrs: Map<string, string>; selfClosing: boolean } | null {
+  const t = tag.trim();
+  if (t.length < 2 || !t.startsWith("<") || !t.endsWith(">")) return null;
+  let inner = t.slice(1, -1);
+  const selfClosing = inner.endsWith("/");
+  if (selfClosing) inner = inner.slice(0, -1);
+  const name = /^[A-Za-z0-9]*/.exec(inner)![0];
   const attrs = new Map<string, string>();
-  for (const a of attrText.matchAll(/([A-Za-z0-9_-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'))?/g)) {
-    if (!attrs.has(a[1])) attrs.set(a[1], a[2] ?? a[3] ?? "true");
+  let rest = inner.slice(name.length);
+  for (;;) {
+    rest = rest.trimStart();
+    if (!rest) break;
+    const key = /^[A-Za-z0-9_-]*/.exec(rest)![0];
+    if (!key) return null;
+    const after = rest.slice(key.length).trimStart();
+    let value = "true";
+    rest = after;
+    if (after.startsWith("=")) {
+      const v = after.slice(1).trimStart();
+      const end = v[0] === '"' || v[0] === "'" ? v.indexOf(v[0], 1) : -1;
+      if (end < 0) return null;
+      value = v.slice(1, end);
+      rest = v.slice(end + 1);
+    }
+    if (!attrs.has(key)) attrs.set(key, value);
   }
-  return attrs;
+  return { name, attrs, selfClosing };
 }
 
 /** Read one tag, such as `<Text color="red">`. Anything that is not exactly a component tag is null. */
 export function component(tag: string): Component | null {
   const t = tag.trim();
   if (/^<\/\s*Text\s*>$/.test(t)) return { kind: "end" };
-  const m = OPEN_TAG.exec(t);
+  const m = parseTag(t);
   if (!m) return null;
-  const attrs = attrsOf(m[2]);
+  const { attrs } = m;
   const checked = (k: string, re: RegExp) => {
     const v = attrs.get(k)?.trim();
     return v && re.test(v) ? v : undefined;
   };
   const color = (k: string) => checked(k, CSS_COLOR);
-  if (m[1] === "Text" && !m[3]) {
+  if (m.name === "Text" && !m.selfClosing) {
     const css: string[] = [];
     const c = color("color");
     const underlineColor = color("underlineColor");
@@ -72,7 +92,7 @@ export function component(tag: string): Component | null {
     if (font) css.push(`font-family: ${font}`);
     return { kind: "text", css: css.join("; ") };
   }
-  if (m[1] === "Rule" && m[3]) {
+  if (m.name === "Rule" && m.selfClosing) {
     const c = color("color");
     return { kind: "rule", css: c ? `border-top-color: ${c}` : "" };
   }
@@ -82,7 +102,20 @@ export function component(tag: string): Component | null {
 const isRuleLine = (text: string) => component(text)?.kind === "rule";
 
 /** The text with component tags removed, for counting words (render.rs `strip_components`). */
-export const stripComponents = (text: string) => text.replace(/<\/?[A-Za-z][^<>]*>/g, (tag) => (component(tag) ? "" : tag));
+export function stripComponents(text: string) {
+  let out = "";
+  let rest = text;
+  for (let i = rest.indexOf("<"); i >= 0; i = rest.indexOf("<")) {
+    out += rest.slice(0, i);
+    const e = rest.indexOf(">", i) + 1;
+    if (e > 0 && component(rest.slice(i, e))) rest = rest.slice(e);
+    else {
+      out += "<";
+      rest = rest.slice(i + 1);
+    }
+  }
+  return out + rest;
+}
 
 /** A `<Rule />` alone on an unindented line is a block of its own, even straight under text (render.rs `isolate_rules`). */
 const ruleBlock: MarkdownConfig = {
@@ -528,7 +561,7 @@ function spansOn(state: EditorState, pos: number): Span[] {
     const c = component(m[0]);
     const from = line.from + m.index;
     const to = from + m[0].length;
-    if (c?.kind === "text") stack.push({ from, to, attrs: attrsOf(OPEN_TAG.exec(m[0])![2]) });
+    if (c?.kind === "text") stack.push({ from, to, attrs: parseTag(m[0])!.attrs });
     else if (c?.kind === "end") {
       const o = stack.pop();
       if (o) spans.push({ open: { from: o.from, to: o.to }, close: { from, to }, attrs: o.attrs });
@@ -609,7 +642,7 @@ const clearText: Command = (view) => {
 /** The rule on the cursor's line (a --- or a <Rule />), and its colour. */
 function ruleAt(state: EditorState): { color?: string } | null {
   const line = state.doc.lineAt(state.selection.main.head);
-  if (isRuleLine(line.text)) return { color: attrsOf(OPEN_TAG.exec(line.text.trim())![2]).get("color") };
+  if (isRuleLine(line.text)) return { color: parseTag(line.text)!.attrs.get("color") };
   if (enclosing(state, line.from, line.from, "HorizontalRule")) return {};
   // A --- straight under the header parses as a heading underline, but it is drawn and printed as a rule.
   return /^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line.text) && line.number === headerEndLine(state.doc) + 1 ? {} : null;

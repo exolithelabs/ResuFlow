@@ -180,7 +180,7 @@ function standardText(id, pkg, library) {
 // ---- packages ----------------------------------------------------------------------
 
 const repoUrl = (r) => (typeof r === "object" ? r?.url : r)?.replace(/^git\+/, "").replace(/\.git$/, "").replace(/^git:\/\//, "https://") || "";
-const stripEmail = (a) => a.replace(/\s*<[^>]*>/g, "").trim();
+const stripEmail = (a) => a.replace(/\s*<[^<>]*>/g, "").replace(/[<>]/g, "").trim();
 
 function rustPackages() {
   const byId = new Map();
@@ -247,7 +247,7 @@ function npmPackages() {
 // ---- report ------------------------------------------------------------------------
 
 const byName = (a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version, undefined, { numeric: true });
-const cell = (s) => String(s).replace(/\|/g, "\\|");
+const cell = (s) => String(s).replace(/[\\|]/g, "\\$&");
 const digest = (s) => createHash("sha256").update(s.replace(/\s+/g, " ").trim()).digest("hex");
 
 function build() {
