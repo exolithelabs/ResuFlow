@@ -193,8 +193,11 @@ mod tests {
     /// Nothing in the generated file is lost on the way to the app.
     #[test]
     fn third_party_parses_completely() {
-        let md = super::THIRD_PARTY;
-        let tp = super::third_party(md);
+        // Parse the compiled file as checked out. Heading and fence checks use LF,
+        // because a Windows checkout rewrites the committed LF file as CRLF.
+        let raw = super::THIRD_PARTY;
+        let md = raw.replace('\r', "");
+        let tp = super::third_party(raw);
 
         // Every package row, and each group's stated count.
         let rows = md.lines().filter(|l| l.starts_with("| ") && l.contains("](#text-")).count();
@@ -231,5 +234,15 @@ mod tests {
         let os = tp.prose.iter().find(|p| p.title == "Supplied by the operating system").unwrap();
         assert!(os.paragraphs.iter().any(|p| p.contains("LGPL 2.1") && p.contains("on request")));
         assert_eq!(tp.groups[1].note, "Bundled into the app's interface.");
+
+        // Same parse when the file is checked out with CRLF, as on Windows.
+        let crlf = super::third_party(&md.replace('\n', "\r\n"));
+        assert_eq!(crlf.groups.len(), tp.groups.len());
+        assert_eq!(
+            crlf.groups.iter().map(|g| g.packages.len()).sum::<usize>(),
+            tp.groups.iter().map(|g| g.packages.len()).sum::<usize>()
+        );
+        assert_eq!(crlf.texts.len(), tp.texts.len());
+        assert_eq!(crlf.texts[0].text, tp.texts[0].text);
     }
 }

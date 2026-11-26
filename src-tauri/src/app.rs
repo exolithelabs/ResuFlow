@@ -361,24 +361,26 @@ fn builder(ws: Workspace) -> tauri::Builder<tauri::Wry> {
 }
 
 pub fn run(dir: Option<PathBuf>) {
-    let ws = match config::workspace(dir.clone()) {
-        Ok(ws) => ws,
-        Err(e) => return cannot_open(e.0, workspace::folder_format(&config::resolve(dir)) > workspace::FORMAT),
-    };
-    builder(ws)
-        .invoke_handler(tauri::generate_handler![
-            info, revision, list_resumes, create_resume, read_parts, write_body, set_fields, set_meta,
-            archive_resume, restore_resume, delete_resume, read_posting, write_posting,
-            read_instructions, write_instructions, check_resume, list_skills,
-            print_resume, save_pdf, licenses, check_update, install_update
-        ])
-        .run(tauri::generate_context!())
-        .expect("failed to start ResuFlow");
+    // macOS dev builds embed Info.plist from this macro under the symbol `_EMBED_INFO_PLIST`.
+    // The macro may run once per crate; a second call fails to compile, which `cargo test` hits.
+    let context = tauri::generate_context!();
+    match config::workspace(dir.clone()) {
+        Ok(ws) => builder(ws)
+            .invoke_handler(tauri::generate_handler![
+                info, revision, list_resumes, create_resume, read_parts, write_body, set_fields, set_meta,
+                archive_resume, restore_resume, delete_resume, read_posting, write_posting,
+                read_instructions, write_instructions, check_resume, list_skills,
+                print_resume, save_pdf, licenses, check_update, install_update
+            ])
+            .run(context)
+            .expect("failed to start ResuFlow"),
+        Err(e) => cannot_open(context, e.0, workspace::folder_format(&config::resolve(dir)) > workspace::FORMAT),
+    }
 }
 
 /// The data folder could not be opened. A double-clicked app has no terminal, so say why in a
 /// dialog. When a newer ResuFlow wrote the folder, the fix is updating, so offer that.
-fn cannot_open(error: String, newer: bool) {
+fn cannot_open(context: tauri::Context<tauri::Wry>, error: String, newer: bool) {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
     eprintln!("resuflow: {error}");
     let offer_update = newer && self_update();
@@ -415,7 +417,7 @@ fn cannot_open(error: String, newer: bool) {
             });
             Ok(())
         })
-        .run(tauri::generate_context!());
+        .run(context);
     if let Err(e) = result {
         eprintln!("resuflow: {e}");
     }
