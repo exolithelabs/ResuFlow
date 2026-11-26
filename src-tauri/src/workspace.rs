@@ -4,11 +4,18 @@
 //! <workspace>/
 //!   resuflow.json              marker file
 //!   profile.mdx                default template: copied into each new resume
-//!   instructions.md            rules the user writes; agents read them and never change them
+//!   instructions.json          rules the user writes; agents read them and never change them
 //!   resumes/<slug>/resume.mdx  one folder per resume: Markdown plus styling components
-//!   resumes/<slug>/posting.md  optional: the job posting this resume targets
-//!   .trash/<slug>-<ms>/        deleted resumes, restorable; nothing is erased
+//!   resumes/<slug>/posting.txt optional: the job posting this resume targets
+//!   .backups/                  copies of the folder taken before each format upgrade
 //! ```
+//!
+//! Archiving a resume only sets its status to `archived`; deleting one erases its folder.
+//!
+//! Upgrading the folder to a newer format (see [`Workspace::upgrade`]) first copies it to
+//! `.backups/format-<old>-<ms>/`, and an upgrade that fails or is cut short is rolled back from
+//! that copy. A folder in a newer format than this build knows is never opened, so going back to
+//! an older ResuFlow cannot rewrite files it does not understand.
 //!
 //! Skills are not stored here: they ship inside the app (see `skills.rs`).
 //!
@@ -21,7 +28,7 @@ use serde::Serialize;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 pub const STATUSES: [&str; 4] = ["draft", "ready", "sent", "archived"];
 
@@ -29,13 +36,31 @@ pub const STATUSES: [&str; 4] = ["draft", "ready", "sent", "archived"];
 const LEGACY_HEADER_FIELDS: [&str; 6] = ["name", "headline", "email", "phone", "location", "links"];
 
 /// Written to `resuflow.json`. Format 3 keeps the header and section rules in the Markdown body;
-/// format 4 names resumes and the template `.mdx` (Markdown plus the components in `render.rs`).
-const MARKER: &str = "{\n  \"app\": \"resuflow\",\n  \"format\": 4\n}\n";
+/// format 4 names resumes and the template `.mdx` (Markdown plus the components in `render.rs`);
+/// format 5 stores instructions as JSON and postings as plain text.
+const MARKER: &str = "{\n  \"app\": \"resuflow\",\n  \"format\": 5\n}\n";
+/// The format in [`MARKER`]: the newest this build reads, and the one it writes.
+pub const FORMAT: u64 = 5;
 
-/// A resume's source file inside `resumes/<slug>/` (and inside a trashed resume's folder).
+/// Copies taken before each upgrade, at the workspace root.
+pub const BACKUPS_DIR: &str = ".backups";
+/// Inside [`BACKUPS_DIR`]: held locked while an upgrade runs, so two processes never upgrade at once.
+const LOCK_FILE: &str = "lock";
+/// Inside [`BACKUPS_DIR`]: names the backup of an upgrade in progress. Left behind only if it was cut short.
+const JOURNAL_FILE: &str = "in-progress";
+/// Inside a backup: written last, once every file has been copied and flushed.
+const BACKUP_DONE: &str = ".complete";
+/// Upgrade backups kept; older ones are removed after a successful upgrade.
+const BACKUPS_KEPT: usize = 5;
+
+/// A resume's source file inside `resumes/<slug>/`.
 pub const RESUME_FILE: &str = "resume.mdx";
 /// The default template, at the workspace root.
 pub const PROFILE_FILE: &str = "profile.mdx";
+/// The user's instructions, at the workspace root.
+pub const INSTRUCTIONS_FILE: &str = "instructions.json";
+/// A resume's target job posting inside `resumes/<slug>/`.
+pub const POSTING_FILE: &str = "posting.txt";
 
 #[derive(Debug)]
 pub struct Error(pub String);
@@ -100,15 +125,6 @@ pub struct InstructionFile {
     pub hash: String,
 }
 
-#[derive(Serialize, Clone, Debug)]
-pub struct TrashEntry {
-    /// Folder name inside `.trash`; pass it to `restore_resume`.
-    pub id: String,
-    pub slug: String,
-    pub title: String,
-    pub deleted_ms: u64,
-}
-
 /// A file that can be read and written as [`Parts`].
 #[derive(Clone, Debug)]
 pub enum Target {
@@ -130,6 +146,16 @@ pub struct NewResume<'a> {
 
 pub struct Workspace {
     pub root: PathBuf,
+    /// Set when opening this workspace upgraded it from an older format.
+    pub upgraded: Option<Upgrade>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct Upgrade {
+    pub from: u64,
+    pub to: u64,
+    /// The copy of the folder as it was before the upgrade.
+    pub backup: PathBuf,
 }
 
 /// Body copied into a new resume when the template body is empty. Also the body of a fresh profile.mdx.
@@ -180,8 +206,8 @@ impl Workspace {
         if !root.is_dir() {
             bail!("workspace folder does not exist: {}", root.display());
         }
-        let ws = Workspace { root: root.canonicalize()? };
-        ws.migrate()?;
+        let mut ws = Workspace { root: root.canonicalize()?, upgraded: None };
+        ws.upgraded = ws.upgrade()?;
         Ok(ws)
     }
 
@@ -199,28 +225,159 @@ impl Workspace {
         Ok(ws)
     }
 
-    /// Bring an older workspace up to date, once. Format 4 renames `.md` sources to `.mdx`;
-    /// format 3 writes the header into the body and a `---` under each section heading.
-    /// Trashed resumes are converted too, so they restore in the current format.
+    /// The format recorded in `resuflow.json`; see [`folder_format`].
+    pub fn format(&self) -> u64 {
+        folder_format(&self.root)
+    }
+
+    /// Refuse to touch a folder a newer ResuFlow has upgraded. Checked on open and before every
+    /// write, so a process started before an update (an agent's MCP server, say) stops writing
+    /// the old format once the new version has upgraded the folder.
+    fn check_format(&self) -> Result<()> {
+        let format = self.format();
+        if format > FORMAT {
+            bail!(
+                "this data folder was upgraded by a newer version of ResuFlow (data format {format}; this version reads up to {FORMAT}). \
+                 Update ResuFlow to open it. Nothing was changed."
+            );
+        }
+        Ok(())
+    }
+
+    /// Bring an older folder up to the current format, safely:
+    ///
+    /// 1. Take an exclusive lock, so the app and an agent's MCP server never upgrade at once.
+    ///    The OS releases it if the process dies.
+    /// 2. Roll back an upgrade an earlier process started but never finished (see [`Self::recover`]).
+    /// 3. Copy the folder to `.backups/`, recording the copy in a journal before touching anything.
+    /// 4. Migrate. If that fails, put the copy back and report the error.
+    ///
+    /// A folder already in the current format costs one small read and takes no lock.
+    fn upgrade(&self) -> Result<Option<Upgrade>> {
+        self.check_format()?;
+        let backups = self.root.join(BACKUPS_DIR);
+        let pending = |ws: &Self| ws.format() < FORMAT || backups.join(JOURNAL_FILE).exists() || !ws.old_trash().is_empty();
+        if !pending(self) {
+            return Ok(None);
+        }
+        fs::create_dir_all(&backups)?;
+        let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(backups.join(LOCK_FILE))?;
+        lock.lock()?;
+        // Another process may have upgraded the folder while this one waited for the lock.
+        self.recover()?;
+        self.check_format()?;
+        if !pending(self) {
+            return Ok(None);
+        }
+        let from = self.format();
+        let backup = self.backup(from)?;
+        if let Err(e) = self.migrate().and_then(|()| self.migrate_trash()) {
+            return Err(match self.restore_backup(&backup) {
+                Ok(()) => {
+                    let _ = fs::remove_file(backups.join(JOURNAL_FILE));
+                    Error(format!("could not upgrade the data folder from format {from}: {e}. It was left as it was; a copy is in {}", backup.display()))
+                }
+                // Keep the journal: the next start retries the rollback.
+                Err(r) => Error(format!("could not upgrade the data folder ({e}) or put it back ({r}); the original files are in {}", backup.display())),
+            });
+        }
+        fs::remove_file(backups.join(JOURNAL_FILE))?;
+        self.prune_backups();
+        Ok(Some(Upgrade { from, to: FORMAT, backup }))
+    }
+
+    /// Finish what an interrupted upgrade left behind. Its backup is complete only once every file
+    /// was copied, and the folder is only touched after that: a complete backup is put back, an
+    /// incomplete one is discarded (the folder was never changed). Call with the lock held.
+    fn recover(&self) -> Result<()> {
+        let journal = self.root.join(BACKUPS_DIR).join(JOURNAL_FILE);
+        let Ok(name) = fs::read_to_string(&journal) else { return Ok(()) };
+        let name = name.trim();
+        if check_slug(name).is_ok() {
+            let backup = self.root.join(BACKUPS_DIR).join(name);
+            if backup.join(BACKUP_DONE).is_file() {
+                eprintln!("resuflow: an earlier upgrade did not finish; restoring {}", backup.display());
+                self.restore_backup(&backup)?;
+            } else if backup.is_dir() {
+                fs::remove_dir_all(&backup)?;
+            }
+        }
+        fs::remove_file(&journal)?;
+        Ok(())
+    }
+
+    /// Copy everything but `.backups/` itself to `.backups/format-<from>-<ms>/`.
+    fn backup(&self, from: u64) -> Result<PathBuf> {
+        let backups = self.root.join(BACKUPS_DIR);
+        let name = format!("format-{from}-{}", now_ms());
+        fs::create_dir_all(&backups)?;
+        atomic_write(&backups.join(JOURNAL_FILE), &name)?;
+        let to = backups.join(&name);
+        copy_tree(&self.root, &to)?;
+        atomic_write(&to.join(BACKUP_DONE), "")?;
+        Ok(to)
+    }
+
+    /// Make the folder exactly what `backup` holds, leaving `.backups/` alone.
+    fn restore_backup(&self, backup: &Path) -> Result<()> {
+        for entry in fs::read_dir(&self.root)?.flatten() {
+            if entry.file_name() == BACKUPS_DIR {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() { fs::remove_dir_all(&path)? } else { fs::remove_file(&path)? }
+        }
+        copy_tree(backup, &self.root)?;
+        let _ = fs::remove_file(self.root.join(BACKUP_DONE));
+        Ok(())
+    }
+
+    /// Keep the newest [`BACKUPS_KEPT`] upgrade backups.
+    fn prune_backups(&self) {
+        let Ok(entries) = fs::read_dir(self.root.join(BACKUPS_DIR)) else { return };
+        let mut found: Vec<(u64, PathBuf)> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.join(BACKUP_DONE).is_file())
+            .filter_map(|p| Some((p.file_name()?.to_str()?.rsplit_once('-')?.1.parse().ok()?, p)))
+            .collect();
+        found.sort_by(|a, b| b.0.cmp(&a.0));
+        for (_, old) in found.into_iter().skip(BACKUPS_KEPT) {
+            let _ = fs::remove_dir_all(old);
+        }
+    }
+
+    /// Bring an older workspace up to date, once. Called by [`Self::upgrade`]. Format 5 turns `instructions.md` into
+    /// `instructions.json` and renames `posting.md` to `posting.txt`; format 4 renames `.md`
+    /// sources to `.mdx`; format 3 writes the header into the body and a `---` under each section heading.
+    /// Resumes still in an old `.trash/` are converted too, before [`Self::migrate_trash`] moves them.
     fn migrate(&self) -> Result<()> {
         let marker = self.root.join("resuflow.json");
-        let format = fs::read_to_string(&marker)
-            .ok()
-            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-            .and_then(|v| v["format"].as_u64())
-            .unwrap_or(0);
-        if format >= 4 {
+        let format = self.format();
+        if format >= FORMAT {
             return Ok(());
         }
         let mut dirs: Vec<PathBuf> = self.slugs().iter().map(|s| self.root.join("resumes").join(s)).collect();
         if let Ok(entries) = fs::read_dir(self.root.join(".trash")) {
             dirs.extend(entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
         }
-        // Format 4: the same text under its new name. An .mdx already there wins.
-        for (dir, old, new) in dirs.iter().map(|d| (d.as_path(), "resume.md", RESUME_FILE)).chain([(self.root.as_path(), "profile.md", PROFILE_FILE)]) {
+        // Formats 4 and 5: the same text under its new name. A file already there wins.
+        let renames = dirs
+            .iter()
+            .flat_map(|d| [(d.as_path(), "resume.md", RESUME_FILE), (d.as_path(), "posting.md", POSTING_FILE)])
+            .chain([(self.root.as_path(), "profile.md", PROFILE_FILE)]);
+        for (dir, old, new) in renames {
             if dir.join(old).is_file() && !dir.join(new).exists() {
                 fs::rename(dir.join(old), dir.join(new))?;
             }
+        }
+        // Format 5: the rules from instructions.md, one per `---`-separated block.
+        let legacy = self.root.join("instructions.md");
+        if legacy.is_file() {
+            if !self.instructions_path().exists() {
+                atomic_write(&self.instructions_path(), &encode_instructions(&decode_markdown_instructions(&fs::read_to_string(&legacy)?)))?;
+            }
+            fs::remove_file(&legacy)?;
         }
         if format < 3 {
             let profile = self.profile();
@@ -232,6 +389,37 @@ impl Workspace {
             }
         }
         atomic_write(&marker, MARKER)
+    }
+
+    /// Older versions moved deleted resumes to `.trash/<slug>-<ms>/`. They come back as archived
+    /// resumes, so nothing the user deleted back then is lost.
+    fn migrate_trash(&self) -> Result<()> {
+        for dir in self.old_trash() {
+            let id = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let base = id.rsplit_once('-').map_or(id.as_str(), |(s, _)| s);
+            let slug = self.unique_slug(if check_slug(base).is_ok() { base } else { "resume" });
+            fs::create_dir_all(self.root.join("resumes"))?;
+            let to = self.resume_dir(&slug)?;
+            fs::rename(&dir, &to)?;
+            let mut doc = Doc::parse(&fs::read_to_string(to.join(RESUME_FILE))?);
+            doc.set("status", Value::Str("archived".into()));
+            atomic_write(&to.join(RESUME_FILE), &doc.to_string())?;
+        }
+        let _ = fs::remove_dir(self.root.join(".trash")); // only if empty
+        Ok(())
+    }
+
+    /// Resumes in an old `.trash/` that [`Self::migrate_trash`] still has to bring back.
+    fn old_trash(&self) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(self.root.join(".trash")) else { return vec![] };
+        entries.flatten().map(|e| e.path()).filter(|p| p.join(RESUME_FILE).is_file()).collect()
+    }
+
+    /// Every write checks here first: the folder is still in a format this build writes, and
+    /// the file still matches the hash the caller read.
+    fn guard(&self, path: &Path, expected_hash: Option<&str>) -> Result<()> {
+        self.check_format()?;
+        guard(path, expected_hash)
     }
 
     pub fn is_workspace(dir: &Path) -> bool {
@@ -297,6 +485,7 @@ impl Workspace {
             None => self.unique_slug(&slugify(title)),
         };
         let path = self.resume_path(&slug)?;
+        self.check_format()?;
         if path.parent().is_some_and(Path::exists) {
             bail!("a resume named '{slug}' already exists");
         }
@@ -318,7 +507,7 @@ impl Workspace {
         if let Some(src) = new.from {
             let posting = self.read_posting(src)?;
             if !posting.content.is_empty() {
-                atomic_write(&self.resume_dir(&slug)?.join("posting.md"), &posting.content)?;
+                atomic_write(&self.resume_dir(&slug)?.join(POSTING_FILE), &posting.content)?;
             }
         }
         self.read_resume(&slug)
@@ -329,7 +518,7 @@ impl Workspace {
         if !path.is_file() {
             bail!("no resume named '{slug}' (use create_resume)");
         }
-        guard(&path, expected_hash)?;
+        self.guard(&path, expected_hash)?;
         atomic_write(&path, content)?;
         self.read_resume(slug)
     }
@@ -385,51 +574,29 @@ impl Workspace {
         self.write_resume(slug, &doc.to_string(), Some(expected_hash.unwrap_or(&current.hash)))
     }
 
-    /// Move a resume (and its posting) to `.trash/`. Nothing is erased.
-    pub fn delete_resume(&self, slug: &str) -> Result<TrashEntry> {
+    /// Archive a resume: it leaves the list of active resumes but keeps every file.
+    pub fn archive_resume(&self, slug: &str) -> Result<ResumeFile> {
+        self.set_meta(slug, None, Some("archived"), None, None)
+    }
+
+    /// Bring an archived resume back as a draft.
+    pub fn restore_resume(&self, slug: &str) -> Result<ResumeFile> {
+        if self.read_resume(slug)?.summary.status != "archived" {
+            bail!("resume '{slug}' is not archived");
+        }
+        self.set_meta(slug, None, Some("draft"), None, None)
+    }
+
+    /// Erase a resume and its posting for good. Only the app offers this, after asking;
+    /// agents can archive but never delete.
+    pub fn delete_resume(&self, slug: &str) -> Result<()> {
         let dir = self.resume_dir(slug)?;
-        if !dir.is_dir() {
+        if !dir.join(RESUME_FILE).is_file() {
             bail!("no resume named '{slug}'");
         }
-        let title = self.read_resume(slug).map(|r| r.summary.title).unwrap_or_else(|_| slug.into());
-        let trash = self.root.join(".trash");
-        fs::create_dir_all(&trash)?;
-        let mut ms = now_ms();
-        while trash.join(format!("{slug}-{ms}")).exists() {
-            ms += 1;
-        }
-        let id = format!("{slug}-{ms}");
-        fs::rename(&dir, trash.join(&id))?;
-        Ok(TrashEntry { id, slug: slug.into(), title, deleted_ms: ms })
-    }
-
-    /// Deleted resumes, most recent first.
-    pub fn list_trash(&self) -> Result<Vec<TrashEntry>> {
-        let Ok(entries) = fs::read_dir(self.root.join(".trash")) else { return Ok(vec![]) };
-        let mut out: Vec<TrashEntry> = entries
-            .flatten()
-            .filter_map(|e| {
-                let id = e.file_name().to_string_lossy().into_owned();
-                let (slug, ms) = parse_trash_id(&id).ok()?;
-                let text = fs::read_to_string(e.path().join(RESUME_FILE)).ok()?;
-                Some(TrashEntry { title: title_of(&Doc::parse(&text), &slug), id, slug, deleted_ms: ms })
-            })
-            .collect();
-        out.sort_by(|a, b| b.deleted_ms.cmp(&a.deleted_ms));
-        Ok(out)
-    }
-
-    /// Move a deleted resume back. If its name was reused meanwhile, it gets a numbered one.
-    pub fn restore_resume(&self, id: &str) -> Result<ResumeFile> {
-        let (slug, _) = parse_trash_id(id)?;
-        let from = self.root.join(".trash").join(id);
-        if !from.join(RESUME_FILE).is_file() {
-            bail!("nothing in the trash with id '{id}'");
-        }
-        let slug = self.unique_slug(&slug);
-        fs::create_dir_all(self.root.join("resumes"))?;
-        fs::rename(&from, self.resume_dir(&slug)?)?;
-        self.read_resume(&slug)
+        self.check_format()?;
+        fs::remove_dir_all(&dir)?;
+        Ok(())
     }
 
     fn unique_slug(&self, base: &str) -> String {
@@ -458,7 +625,7 @@ impl Workspace {
             tags: d.list("tags"),
             updated_ms: mtime_ms(path),
             words: count_words(&d.body),
-            has_posting: path.with_file_name("posting.md").is_file(),
+            has_posting: path.with_file_name(POSTING_FILE).is_file(),
         }
     }
 
@@ -466,15 +633,15 @@ impl Workspace {
 
     /// The job posting a resume targets. Empty when none is saved.
     pub fn read_posting(&self, slug: &str) -> Result<TextFile> {
-        let path = self.existing_resume(slug)?.with_file_name("posting.md");
+        let path = self.existing_resume(slug)?.with_file_name(POSTING_FILE);
         let content = fs::read_to_string(path).unwrap_or_default();
         Ok(TextFile { hash: hash(&content), content })
     }
 
     /// Save (or, with blank content, remove) the posting a resume targets.
     pub fn write_posting(&self, slug: &str, content: &str, expected_hash: Option<&str>) -> Result<TextFile> {
-        let path = self.existing_resume(slug)?.with_file_name("posting.md");
-        guard(&path, expected_hash)?;
+        let path = self.existing_resume(slug)?.with_file_name(POSTING_FILE);
+        self.guard(&path, expected_hash)?;
         if content.trim().is_empty() {
             if path.exists() {
                 fs::remove_file(&path)?;
@@ -492,7 +659,7 @@ impl Workspace {
     }
 
     fn instructions_path(&self) -> PathBuf {
-        self.root.join("instructions.md")
+        self.root.join(INSTRUCTIONS_FILE)
     }
 
     pub fn read_profile(&self) -> Result<TextFile> {
@@ -501,7 +668,7 @@ impl Workspace {
     }
 
     pub fn write_profile(&self, content: &str, expected_hash: Option<&str>) -> Result<TextFile> {
-        guard(&self.profile_path(), expected_hash)?;
+        self.guard(&self.profile_path(), expected_hash)?;
         atomic_write(&self.profile_path(), content)?;
         self.read_profile()
     }
@@ -513,18 +680,29 @@ impl Workspace {
     pub fn read_instructions(&self) -> Result<InstructionFile> {
         self.ensure_instructions()?;
         let content = fs::read_to_string(self.instructions_path())?;
-        Ok(InstructionFile { items: decode_instructions(&content), hash: hash(&content) })
+        Ok(InstructionFile { items: decode_instructions(&content)?, hash: hash(&content) })
+    }
+
+    /// The instructions as a Markdown document, for agents that read them as a resource.
+    pub fn instructions_markdown(&self) -> Result<String> {
+        let mut s = String::from("# Instructions\n");
+        for item in self.read_instructions()?.items {
+            s.push_str("\n---\n\n");
+            s.push_str(&item);
+            s.push('\n');
+        }
+        Ok(s)
     }
 
     /// Replace the instructions. Only the desktop app does this; agents read them.
     pub fn write_instructions(&self, items: &[String], expected_hash: Option<&str>) -> Result<InstructionFile> {
         self.ensure_instructions()?;
-        guard(&self.instructions_path(), expected_hash)?;
+        self.guard(&self.instructions_path(), expected_hash)?;
         atomic_write(&self.instructions_path(), &encode_instructions(items))?;
         self.read_instructions()
     }
 
-    /// Create `instructions.md`. A leftover `memory.md` from format 1 is migrated into it once.
+    /// Create `instructions.json`. A leftover `memory.md` from format 1 is migrated into it once.
     fn ensure_instructions(&self) -> Result<()> {
         let path = self.instructions_path();
         if path.exists() {
@@ -573,7 +751,7 @@ impl Workspace {
     /// Replace the body, keeping the front matter as it is on disk.
     pub fn write_body(&self, t: &Target, body: &str, expected_hash: Option<&str>) -> Result<Parts> {
         let path = self.target_path(t)?;
-        guard(&path, expected_hash)?;
+        self.guard(&path, expected_hash)?;
         let mut doc = Doc::parse(&fs::read_to_string(&path).unwrap_or_default());
         doc.body = body.to_string();
         atomic_write(&path, &doc.to_string())?;
@@ -588,7 +766,7 @@ impl Workspace {
         expected_hash: Option<&str>,
     ) -> Result<Parts> {
         let path = self.target_path(t)?;
-        guard(&path, expected_hash)?;
+        self.guard(&path, expected_hash)?;
         let mut doc = Doc::parse(&fs::read_to_string(&path).unwrap_or_default());
         for (k, v) in fields {
             if k.is_empty() || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
@@ -625,17 +803,26 @@ impl Workspace {
         };
         visit(&self.profile_path());
         visit(&self.instructions_path());
-        visit(&self.root.join(".trash"));
         for slug in self.slugs() {
             let dir = self.root.join("resumes").join(slug);
             visit(&dir.join(RESUME_FILE));
-            visit(&dir.join("posting.md"));
+            visit(&dir.join(POSTING_FILE));
         }
         format!("{:016x}", h.0)
     }
 }
 
 // ---- helpers -----------------------------------------------------------------
+
+/// The format a folder's `resuflow.json` records; 0 for none (a folder from before the marker
+/// had one, or one that is not a workspace yet).
+pub fn folder_format(root: &Path) -> u64 {
+    fs::read_to_string(root.join("resuflow.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v["format"].as_u64())
+        .unwrap_or(0)
+}
 
 fn migrate_file(path: &Path, fallback: Option<&Doc>) -> Result<()> {
     let before = fs::read_to_string(path)?;
@@ -723,14 +910,6 @@ pub fn check_slug(s: &str) -> Result<()> {
     Ok(())
 }
 
-/// `<slug>-<ms>`, the folder name of a trashed resume.
-fn parse_trash_id(id: &str) -> Result<(String, u64)> {
-    let parsed = id.rsplit_once('-').and_then(|(slug, ms)| Some((slug, ms.parse::<u64>().ok()?)));
-    match parsed {
-        Some((slug, ms)) if check_slug(slug).is_ok() => Ok((slug.to_string(), ms)),
-        _ => bail!("invalid trash id '{id}'"),
-    }
-}
 
 pub fn slugify(s: &str) -> String {
     let mut out = String::new();
@@ -775,6 +954,28 @@ pub(crate) fn atomic_write(path: &Path, content: &str) -> Result<()> {
     Ok(result?)
 }
 
+/// Copy a folder tree, skipping `.backups/` and half-written temporary files. Each file is
+/// flushed to disk, so a backup marked complete really is.
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)?.flatten() {
+        let name = entry.file_name();
+        let text = name.to_string_lossy();
+        if name == BACKUPS_DIR || (text.starts_with('.') && text.ends_with(".tmp")) {
+            continue;
+        }
+        let (src, dest) = (entry.path(), to.join(&name));
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_tree(&src, &dest)?;
+        } else if kind.is_file() {
+            fs::copy(&src, &dest)?;
+            fs::OpenOptions::new().write(true).open(&dest)?.sync_all()?; // Windows flushes only writable handles
+        }
+    }
+    Ok(())
+}
+
 fn create_new(path: &Path, content: &str) -> Result<()> {
     if !path.exists() {
         atomic_write(path, content)?;
@@ -791,7 +992,7 @@ fn mtime_ms(p: &Path) -> u64 {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+    std::time::SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 struct Fnv(u64);
@@ -815,18 +1016,32 @@ pub fn hash(s: &str) -> String {
     format!("{:016x}", h.0)
 }
 
-/// instructions.md: a heading, then one rule per `---`-separated block.
+/// instructions.json: `{"instructions": ["rule", ...]}`, blank rules dropped.
 fn encode_instructions(items: &[String]) -> String {
-    let mut s = String::from("# Instructions\n");
-    for item in items.iter().map(|i| i.trim()).filter(|i| !i.is_empty()) {
-        s.push_str("\n---\n\n");
-        s.push_str(item);
-        s.push('\n');
-    }
+    let items: Vec<&str> = items.iter().map(|i| i.trim()).filter(|i| !i.is_empty()).collect();
+    let mut s = serde_json::to_string_pretty(&serde_json::json!({ "instructions": items })).unwrap_or_default();
+    s.push('\n');
     s
 }
 
-fn decode_instructions(content: &str) -> Vec<String> {
+/// Refuses a file it cannot read, so a hand-edit gone wrong is reported instead of overwritten.
+fn decode_instructions(content: &str) -> Result<Vec<String>> {
+    let v: serde_json::Value = serde_json::from_str(content).map_err(|e| Error(format!("{INSTRUCTIONS_FILE} is not valid JSON: {e}")))?;
+    let Some(list) = v["instructions"].as_array() else {
+        bail!("{INSTRUCTIONS_FILE} needs an \"instructions\" list");
+    };
+    let mut items = Vec::new();
+    for item in list {
+        let Some(text) = item.as_str() else { bail!("{INSTRUCTIONS_FILE}: every instruction must be a string") };
+        if !text.trim().is_empty() {
+            items.push(text.trim().to_string());
+        }
+    }
+    Ok(items)
+}
+
+/// The instructions.md of format 4: a heading, then one rule per `---`-separated block.
+fn decode_markdown_instructions(content: &str) -> Vec<String> {
     let mut items = Vec::new();
     let mut cur: Option<String> = None;
     for line in content.lines() {
@@ -921,24 +1136,40 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn trash_and_restore() {
+    fn archive_restore_and_delete() {
         let t = TempWs::new();
         let ws = &t.0;
         create(ws, "Data Engineer");
         ws.write_posting("data-engineer", "posting", None).unwrap();
+        assert_eq!(ws.archive_resume("data-engineer").unwrap().summary.status, "archived");
+        let restored = ws.restore_resume("data-engineer").unwrap();
+        assert_eq!(restored.summary.status, "draft");
+        assert!(restored.summary.has_posting);
+        assert!(ws.restore_resume("data-engineer").is_err()); // not archived any more
+
         let before = ws.revision();
-        let entry = ws.delete_resume("data-engineer").unwrap();
+        ws.delete_resume("data-engineer").unwrap();
         assert_ne!(before, ws.revision());
         assert!(ws.list_resumes().unwrap().is_empty());
-        assert_eq!(ws.list_trash().unwrap()[0].title, "Data Engineer");
+        assert!(!ws.root.join("resumes/data-engineer").exists());
+        assert!(ws.delete_resume("data-engineer").is_err());
+        assert!(ws.delete_resume("../x").is_err());
+    }
 
-        create(ws, "Data Engineer"); // name reused while it was in the trash
-        let restored = ws.restore_resume(&entry.id).unwrap();
-        assert_eq!(restored.summary.slug, "data-engineer-2");
-        assert!(restored.summary.has_posting);
-        assert!(ws.list_trash().unwrap().is_empty());
-        assert!(ws.restore_resume(&entry.id).is_err());
-        assert!(ws.restore_resume("../x-1").is_err());
+    #[test]
+    fn old_trash_comes_back_archived() {
+        let t = TempWs::new();
+        let root = t.0.root.clone();
+        create(&t.0, "Old");
+        fs::write(root.join("resuflow.json"), "{\"app\": \"resuflow\", \"format\": 4}").unwrap();
+        fs::create_dir_all(root.join(".trash/old-123")).unwrap();
+        fs::write(root.join(".trash/old-123").join(RESUME_FILE), "---\ntitle: Old\nstatus: sent\n---\nBody\n").unwrap();
+        fs::write(root.join(".trash/old-123/posting.md"), "posting").unwrap();
+        let ws = Workspace::open(&root).unwrap();
+        let r = ws.read_resume("old-2").unwrap();
+        assert_eq!(r.summary.status, "archived");
+        assert!(r.summary.has_posting);
+        assert!(!root.join(".trash").exists());
     }
 
     #[test]
@@ -986,7 +1217,7 @@ pub(crate) mod tests {
     fn memory_file_becomes_instructions() {
         for (memory, expected) in [("# Memory\n\nPrefer one page.\n", vec!["Prefer one page."]), (LEGACY_MEMORY, vec![])] {
             let t = TempWs::new();
-            fs::remove_file(t.0.root.join("instructions.md")).unwrap();
+            fs::remove_file(t.0.root.join(INSTRUCTIONS_FILE)).unwrap();
             fs::write(t.0.root.join("memory.md"), memory).unwrap();
             assert_eq!(t.0.read_instructions().unwrap().items, expected);
             assert!(!t.0.root.join("memory.md").exists());
@@ -1016,9 +1247,11 @@ pub(crate) mod tests {
             ws.read_resume("own").unwrap().content,
             "---\ntitle: Own\n---\n\n# Ada\nData person\nLeeds · a@b.c · a.dev\n\n## Skills\n---\n- Rust\n```\n## not a heading\n```\n"
         );
-        let old = fs::read_to_string(root.join(".trash/old-1").join(RESUME_FILE)).unwrap();
+        let old = ws.read_resume("old").unwrap();
+        assert_eq!(old.summary.status, "archived"); // the old trash comes back archived
+        let old = old.content;
         assert!(old.contains("# Ada\nEngineer\n") && old.contains("## Work\n---\n## Ruled\n<Rule color=\"red\" />\n"));
-        assert!(fs::read_to_string(root.join("resuflow.json")).unwrap().contains("\"format\": 4"));
+        assert!(fs::read_to_string(root.join("resuflow.json")).unwrap().contains("\"format\": 5"));
 
         // Once migrated, opening again changes nothing.
         let own = ws.read_resume("own").unwrap().hash;
@@ -1038,9 +1271,30 @@ pub(crate) mod tests {
         let ws = Workspace::open(&root).unwrap();
         let a = ws.read_resume("a").unwrap();
         assert_eq!(a.content, "---\ntitle: A\n---\n\n# Ada\n"); // renamed, not rewritten
-        assert!(a.summary.has_posting && root.join("resumes/a/posting.md").is_file());
+        assert!(a.summary.has_posting && root.join("resumes/a").join(POSTING_FILE).is_file());
         assert!(ws.read_profile().unwrap().content.starts_with("# Your Name"));
         assert!(!root.join("resumes/a/resume.md").exists() && !root.join("profile.md").exists());
+    }
+
+    #[test]
+    fn format_4_instructions_and_postings_are_migrated() {
+        let t = TempWs::new();
+        let root = t.0.root.clone();
+        fs::write(root.join("resuflow.json"), "{\"app\": \"resuflow\", \"format\": 4}").unwrap();
+        fs::remove_file(root.join(INSTRUCTIONS_FILE)).unwrap();
+        fs::write(root.join("instructions.md"), "# Instructions\n\n---\n\nLead with the role.\n\n---\n\nNo tables.\n\nEver.\n").unwrap();
+        create(&t.0, "A");
+        fs::write(root.join("resumes/a/posting.md"), "We need Rust.").unwrap();
+
+        let ws = Workspace::open(&root).unwrap();
+        assert_eq!(ws.read_instructions().unwrap().items, vec!["Lead with the role.", "No tables.\n\nEver."]);
+        assert!(!root.join("instructions.md").exists());
+        assert_eq!(ws.read_posting("a").unwrap().content, "We need Rust.");
+        assert!(!root.join("resumes/a/posting.md").exists());
+        assert!(ws.instructions_markdown().unwrap().contains("\n---\n\nNo tables.\n\nEver.\n"));
+
+        fs::write(root.join(INSTRUCTIONS_FILE), "not json").unwrap();
+        assert!(ws.read_instructions().unwrap_err().0.contains("not valid JSON"));
     }
 
     #[test]
@@ -1061,14 +1315,147 @@ pub(crate) mod tests {
         assert!(t.0.read_resume("a").unwrap().content.contains("# Ada\n\n## Work\n---\n"));
     }
 
+    fn backups(root: &Path) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = fs::read_dir(root.join(BACKUPS_DIR)).map(|r| r.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect()).unwrap_or_default();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn upgrade_keeps_a_copy_of_the_old_folder() {
+        let t = TempWs::new();
+        let root = t.0.root.clone();
+        assert!(t.0.upgraded.is_none() && !root.join(BACKUPS_DIR).exists(), "a new folder needs no upgrade");
+        let old_marker = "{\"app\": \"resuflow\", \"format\": 4}";
+        fs::write(root.join("resuflow.json"), old_marker).unwrap();
+        create(&t.0, "A");
+        fs::write(root.join("resumes/a/posting.md"), "We need Rust.").unwrap();
+
+        let ws = Workspace::open(&root).unwrap();
+        let up = ws.upgraded.clone().expect("upgraded");
+        assert_eq!((up.from, up.to), (4, FORMAT));
+        assert_eq!(fs::read_to_string(up.backup.join("resumes/a/posting.md")).unwrap(), "We need Rust.");
+        assert_eq!(fs::read_to_string(up.backup.join("resuflow.json")).unwrap(), old_marker);
+        assert!(up.backup.join(BACKUP_DONE).is_file());
+        assert!(!root.join(BACKUPS_DIR).join(JOURNAL_FILE).exists());
+        assert!(!root.join(BACKUP_DONE).exists());
+        // Already current: opening again takes no new backup.
+        assert!(Workspace::open(&root).unwrap().upgraded.is_none());
+        assert_eq!(backups(&root).len(), 1);
+    }
+
+    #[test]
+    fn newer_formats_are_never_touched() {
+        let t = TempWs::new();
+        let root = t.0.root.clone();
+        create(&t.0, "A");
+        let before = t.0.read_resume("a").unwrap();
+        // A newer ResuFlow upgrades the folder while this one is running...
+        fs::write(root.join("resuflow.json"), "{\"app\": \"resuflow\", \"format\": 99}").unwrap();
+        let err = t.0.write_resume("a", "changed", Some(&before.hash)).unwrap_err().0;
+        assert!(err.contains("newer version of ResuFlow"), "{err}");
+        assert!(t.0.create_resume(NewResume { title: "B", ..Default::default() }).is_err());
+        assert!(t.0.delete_resume("a").is_err());
+        assert!(t.0.write_profile("x", None).is_err());
+        assert_eq!(t.0.read_resume("a").unwrap().content, before.content, "reads still work");
+        // ...and an older one refuses to open it at all.
+        assert!(Workspace::open(&root).err().unwrap().0.contains("data format 99"));
+        assert!(Workspace::init(&root).is_err());
+        assert!(!root.join(BACKUPS_DIR).exists());
+    }
+
+    #[test]
+    fn a_failed_upgrade_puts_everything_back() {
+        let t = TempWs::new();
+        let root = t.0.root.clone();
+        fs::write(root.join("resuflow.json"), "{\"app\": \"resuflow\", \"format\": 2}").unwrap();
+        fs::remove_file(root.join(PROFILE_FILE)).unwrap();
+        fs::create_dir_all(root.join("resumes/a")).unwrap();
+        fs::create_dir_all(root.join("resumes/b")).unwrap();
+        fs::write(root.join("resumes/a/resume.md"), "---\nname: Ada\n---\n## Work\n").unwrap();
+        fs::write(root.join("resumes/b/resume.md"), b"not \xff utf-8").unwrap(); // `a` migrates, then `b` fails
+
+        let err = Workspace::open(&root).err().expect("upgrade fails").0;
+        assert!(err.contains("left as it was"), "{err}");
+        assert_eq!(fs::read_to_string(root.join("resumes/a/resume.md")).unwrap(), "---\nname: Ada\n---\n## Work\n");
+        assert!(!root.join("resumes/a").join(RESUME_FILE).exists());
+        assert_eq!(fs::read(root.join("resumes/b/resume.md")).unwrap(), b"not \xff utf-8");
+        assert!(fs::read_to_string(root.join("resuflow.json")).unwrap().contains("\"format\": 2"));
+        assert!(!root.join(BACKUPS_DIR).join(JOURNAL_FILE).exists());
+        assert_eq!(backups(&root).len(), 1, "the copy is kept");
+    }
+
+    #[test]
+    fn an_interrupted_upgrade_is_rolled_back_then_redone() {
+        let t = TempWs::new();
+        let root = t.0.root.clone();
+        fs::write(root.join("resuflow.json"), "{\"app\": \"resuflow\", \"format\": 4}").unwrap();
+        create(&t.0, "A");
+        fs::write(root.join("resumes/a/posting.md"), "We need Rust.").unwrap();
+        // Crash after the backup completed, halfway through migrating.
+        let backup = t.0.backup(4).unwrap();
+        fs::rename(root.join("resumes/a/posting.md"), root.join("resumes/a/posting.txt")).unwrap();
+        fs::write(root.join("resumes/a/stray.tmp-from-migration"), "").unwrap();
+
+        let ws = Workspace::open(&root).unwrap();
+        assert_eq!(ws.read_posting("a").unwrap().content, "We need Rust.");
+        assert!(!root.join("resumes/a/stray.tmp-from-migration").exists());
+        assert!(!root.join("resumes/a/posting.md").exists());
+        assert!(backup.join(BACKUP_DONE).is_file(), "the rolled-back copy is kept");
+        assert_eq!(ws.upgraded.unwrap().from, 4);
+
+        // Crash while the backup was still being copied: the folder was never touched.
+        let partial = root.join(BACKUPS_DIR).join("format-5-1");
+        fs::create_dir_all(&partial).unwrap();
+        fs::write(root.join(BACKUPS_DIR).join(JOURNAL_FILE), "format-5-1").unwrap();
+        let ws = Workspace::open(&root).unwrap();
+        assert!(!partial.exists() && !root.join(BACKUPS_DIR).join(JOURNAL_FILE).exists());
+        assert_eq!(ws.read_posting("a").unwrap().content, "We need Rust.");
+    }
+
+    #[test]
+    fn concurrent_opens_upgrade_once() {
+        let t = TempWs::new();
+        let root = t.0.root.clone();
+        fs::write(root.join("resuflow.json"), "{\"app\": \"resuflow\", \"format\": 4}").unwrap();
+        create(&t.0, "A");
+        fs::write(root.join("resumes/a/posting.md"), "We need Rust.").unwrap();
+        let opened: Vec<Workspace> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..4).map(|_| s.spawn(|| Workspace::open(&root).ok().unwrap())).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(opened.iter().filter(|w| w.upgraded.is_some()).count(), 1);
+        assert_eq!(backups(&root).len(), 1);
+        assert_eq!(opened[0].read_posting("a").unwrap().content, "We need Rust.");
+    }
+
+    #[test]
+    fn only_recent_backups_are_kept() {
+        let t = TempWs::new();
+        let root = t.0.root.clone();
+        for i in 0..BACKUPS_KEPT + 2 {
+            let dir = root.join(BACKUPS_DIR).join(format!("format-4-{}", 1000 + i));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(BACKUP_DONE), "").unwrap();
+        }
+        fs::create_dir_all(root.join(BACKUPS_DIR).join("mine")).unwrap(); // not ours: left alone
+        t.0.prune_backups();
+        let names: Vec<String> = backups(&root).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(names.len(), BACKUPS_KEPT + 1);
+        assert!(!names.contains(&"format-4-1000".to_string()) && !names.contains(&"format-4-1001".to_string()));
+        assert!(names.contains(&"mine".to_string()));
+    }
+
+    #[test]
+    fn marker_matches_format() {
+        assert!(MARKER.contains(&format!("\"format\": {FORMAT}")));
+    }
+
     #[test]
     fn rejects_bad_names() {
         assert!(check_slug("../etc").is_err());
         assert!(check_slug("a/b").is_err());
         assert!(check_slug("Good").is_err());
         assert!(check_slug("good-1").is_ok());
-        assert!(parse_trash_id("good-1-123").is_ok());
-        assert!(parse_trash_id("good").is_err());
-        assert!(parse_trash_id("../x-12").is_err());
     }
 }

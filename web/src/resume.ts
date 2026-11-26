@@ -133,7 +133,7 @@ export class ResumeView implements View {
     $("export").onclick = () => void this.exportPdf();
     $("print").onclick = () => void this.print();
     $("duplicate").onclick = () => this.slug && app.newResume(this.slug);
-    $("delete").onclick = () => this.slug && void app.trash(this.slug);
+    $("delete").onclick = () => this.slug && void app.deleteResume(this.slug);
 
     if (!store.info?.pdf_export) {
       $("export").hidden = true;

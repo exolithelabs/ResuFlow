@@ -29,7 +29,8 @@
         <button class="nav-item" type="button" data-route="instructions"><i data-icon="rules"></i><span>Instructions</span><span class="count" id="count-instructions"></span></button>
         <button class="nav-item" type="button" data-route="skills"><i data-icon="spark"></i><span>Skills</span></button>
         <button class="nav-item" type="button" data-route="connect"><i data-icon="plug"></i><span>Connect an agent</span></button>
-        <button class="nav-item" type="button" data-route="trash"><i data-icon="trash"></i><span>Trash</span><span class="count" id="count-trash"></span></button>
+        <button class="nav-item" type="button" data-route="archive"><i data-icon="archive"></i><span>Archive</span><span class="count" id="count-archive"></span></button>
+        <button class="nav-item" type="button" data-route="about"><i data-icon="info"></i><span>About</span><span class="badge accent" id="update-badge"></span></button>
       </nav>
     </aside>
 
@@ -99,7 +100,7 @@
               </dl>
               <div class="pane-actions">
                 <button id="duplicate" class="btn" type="button"><i data-icon="duplicate"></i><span>Duplicate</span></button>
-                <button id="delete" class="btn danger-text" type="button"><i data-icon="trash"></i><span>Move to trash</span></button>
+                <button id="delete" class="btn danger-text" type="button"><i data-icon="trash"></i><span>Delete…</span></button>
               </div>
             </div>
           </aside>
@@ -149,8 +150,6 @@
             <h1>Skills</h1>
             <p>Writing playbooks built into ResuFlow. Connected agents load them on demand.</p>
           </div>
-          <span class="spacer"></span>
-          <button id="install-skills" class="btn" type="button" title="Copy all skills to ~/.agents/skills, the shared folder agents read skills from"><i data-icon="download"></i><span>Install skills</span></button>
         </header>
         <div class="split">
           <nav id="skill-list" class="skill-list" aria-label="Skills"></nav>
@@ -158,8 +157,6 @@
             <div class="narrow">
               <div class="skill-head">
                 <span class="badge">Built in · read-only</span>
-                <span class="spacer"></span>
-                <button id="skill-copy" class="btn ghost small" type="button"><i data-icon="copy"></i><span class="label">Copy</span></button>
               </div>
               <div id="skill-viewer" class="doc prose"></div>
             </div>
@@ -188,6 +185,7 @@
                 <li>Read your default template, instructions and every resume.</li>
                 <li>Create, tailor and edit resumes. You see the changes here as they happen.</li>
                 <li>Save the job posting a resume targets and check keyword coverage.</li>
+                <li>Archive and restore resumes. Only you can delete one.</li>
                 <li>Load the built-in skills for research, bullets, ATS passes and reviews.</li>
               </ul>
               <p class="hint">It can't change your instructions. If you and the agent edit the same resume at once, ResuFlow asks before anything is overwritten.</p>
@@ -197,15 +195,60 @@
         </div>
       </section>
 
-      <!-- ============================================================ trash -->
-      <section id="view-trash" class="view" hidden>
+      <!-- ============================================================ archive -->
+      <section id="view-archive" class="view" hidden>
         <header class="toolbar">
           <div class="view-title">
-            <h1>Trash</h1>
-            <p>Deleted resumes stay here until you remove them from the data folder yourself.</p>
+            <h1>Archive</h1>
+            <p>Resumes you're done with, kept out of the list. Restore one, or delete it for good.</p>
           </div>
         </header>
-        <div class="scroll"><div class="narrow"><ul id="trash-list" class="trash-list"></ul></div></div>
+        <div class="scroll"><div class="narrow"><ul id="archive-list" class="archive-list"></ul></div></div>
+      </section>
+
+      <!-- ============================================================ about -->
+      <section id="view-about" class="view" hidden>
+        <header class="toolbar">
+          <div class="view-title">
+            <h1>About ResuFlow</h1>
+            <p>Version <span id="about-version"></span> · Free and open source under the <span id="about-license"></span> license.</p>
+          </div>
+        </header>
+        <div class="scroll">
+          <div class="narrow">
+            <section class="card">
+              <h2>Updates</h2>
+              <p id="update-status" aria-live="polite"></p>
+              <div id="update-found" class="update-found" hidden>
+                <div id="update-notes" class="update-notes"></div>
+                <div id="update-progress" class="meter" hidden><span></span></div>
+              </div>
+              <div class="card-actions">
+                <button id="update-check" class="btn" type="button"><i data-icon="restore"></i><span>Check for updates</span></button>
+                <button id="update-install" class="btn primary" type="button" hidden><i data-icon="download"></i><span>Install and restart</span></button>
+                <label class="check"><input id="update-auto" type="checkbox" /> Check when ResuFlow starts</label>
+              </div>
+              <p class="hint">Updates come from the project's GitHub releases and are signed: ResuFlow refuses one that isn't. Your open edits are saved first. When a new version changes how your data is stored, it keeps a copy of the old files in <code>.backups</code> inside your data folder before changing anything.</p>
+            </section>
+            <section class="card">
+              <h2>Your data</h2>
+              <dl class="facts">
+                <dt>Folder</dt><dd id="about-root"></dd>
+                <dt>Data format</dt><dd id="about-format"></dd>
+              </dl>
+            </section>
+            <section class="card">
+              <h2>Licenses</h2>
+              <p>ResuFlow is licensed under the Apache License 2.0. It is built on open-source packages, each under its own license.</p>
+              <div class="card-actions" role="group" aria-label="Show license">
+                <button class="btn small" type="button" data-license="license" aria-pressed="false">ResuFlow license</button>
+                <button class="btn small" type="button" data-license="notice" aria-pressed="false">Notice</button>
+                <button class="btn small" type="button" data-license="third_party" aria-pressed="false">Third-party licenses</button>
+              </div>
+              <div id="license-body" class="license-body" hidden></div>
+            </section>
+          </div>
+        </div>
       </section>
 
       <!-- ============================================================ welcome -->
@@ -226,7 +269,7 @@
     <div id="row-menu" class="menu" role="menu" hidden>
       <button type="button" class="menu-item" role="menuitem" data-act="duplicate"><i data-icon="duplicate"></i>Duplicate</button>
       <button type="button" class="menu-item" role="menuitem" data-act="archive"><i data-icon="archive"></i><span>Archive</span></button>
-      <button type="button" class="menu-item danger" role="menuitem" data-act="delete"><i data-icon="trash"></i>Move to trash</button>
+      <button type="button" class="menu-item danger" role="menuitem" data-act="delete"><i data-icon="trash"></i>Delete…</button>
     </div>
 
     <dialog id="dlg-new" aria-labelledby="dlg-new-title">
@@ -243,6 +286,17 @@
         <menu>
           <button value="cancel" formnovalidate class="btn ghost" type="submit">Cancel</button>
           <button value="ok" class="btn primary" type="submit">Create</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-delete" aria-labelledby="dlg-delete-title">
+      <form method="dialog">
+        <h2 id="dlg-delete-title">Delete resume?</h2>
+        <p id="dlg-delete-msg" class="dialog-msg"></p>
+        <menu>
+          <button value="cancel" class="btn ghost" type="submit" autofocus>Cancel</button>
+          <button value="ok" class="btn danger" type="submit">Delete permanently</button>
         </menu>
       </form>
     </dialog>

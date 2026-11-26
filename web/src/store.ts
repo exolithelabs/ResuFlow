@@ -8,7 +8,8 @@ export type Route =
   | { kind: "instructions" }
   | { kind: "skills"; name?: string }
   | { kind: "connect" }
-  | { kind: "trash" }
+  | { kind: "archive" }
+  | { kind: "about" }
   | { kind: "welcome" };
 
 export interface View {
@@ -31,8 +32,15 @@ export const app = {
   navigate: async (_route: Route) => {},
   refreshList: async () => {},
   newResume: (_from?: string) => {},
-  trash: async (_slug: string) => {},
+  archive: async (_slug: string) => {},
+  restore: async (_slug: string) => {},
+  /** Asks first, then erases the resume for good. */
+  deleteResume: async (_slug: string) => {},
+  /** Save every pending edit now (before an update restarts the app). */
+  saveAll: async () => {},
 };
 
 export const resumeRoute = (slug?: string | null): Route => (slug ? { kind: "resume", slug } : { kind: "welcome" });
-export const firstResume = () => store.resumes.find((r) => r.status !== "archived") ?? store.resumes[0];
+/** Archived resumes live in the Archive view, not the sidebar list. */
+export const activeResumes = () => store.resumes.filter((r) => r.status !== "archived");
+export const firstResume = () => activeResumes()[0];

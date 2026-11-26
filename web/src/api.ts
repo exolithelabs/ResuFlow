@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 export type Status = "draft" | "ready" | "sent" | "archived";
 export const STATUSES: Status[] = ["draft", "ready", "sent", "archived"];
@@ -26,12 +26,6 @@ export interface TextFile {
 export interface InstructionFile {
   items: string[];
   hash: string;
-}
-export interface TrashEntry {
-  id: string;
-  slug: string;
-  title: string;
-  deleted_ms: number;
 }
 export interface Skill {
   name: string;
@@ -62,6 +56,46 @@ export interface Info {
   mcp_config: unknown;
   version: string;
   pdf_export: boolean;
+  /** The data folder's format, and the upgrade opening it just did, if any. */
+  format: number;
+  upgraded: { from: number; to: number; backup: string } | null;
+  /** Whether this copy can update itself (a release AppImage, Windows install or macOS app). */
+  updates: boolean;
+  license: string;
+}
+export interface Licenses {
+  id: string;
+  license: string;
+  notice: string;
+  third_party: ThirdParty;
+}
+/** THIRD_PARTY_LICENSES.md, taken apart. Prose is Markdown; license texts are verbatim. */
+export interface ThirdParty {
+  prose: { title: string; paragraphs: string[] }[];
+  summary: [string, number][];
+  groups: { title: string; note: string; packages: ThirdPartyPackage[] }[];
+  /** Package `texts` index into this. */
+  texts: { kind: string; users: number; text: string }[];
+}
+export interface ThirdPartyPackage {
+  name: string;
+  note: string;
+  /** Empty when used on every platform. */
+  platforms: string;
+  version: string;
+  declared: string;
+  used: string;
+  source: string;
+  texts: number[];
+}
+export interface UpdateInfo {
+  version: string;
+  notes: string | null;
+  date: string | null;
+}
+export interface Progress {
+  done: number;
+  total: number | null;
 }
 /** "profile" or "resume:<slug>" */
 export type FileId = "profile" | `resume:${string}`;
@@ -80,10 +114,11 @@ export const api = {
     invoke<Parts>("set_fields", { file, fields, expectedHash }),
   setMeta: (slug: string, meta: { title?: string; status?: Status; tags?: string[] }, expectedHash?: string) =>
     invoke<Parts>("set_meta", { slug, ...meta, expectedHash }),
-  deleteResume: (slug: string) => invoke<TrashEntry>("delete_resume", { slug }),
-  listTrash: () => invoke<TrashEntry[]>("list_trash"),
-  /** Resolves to the restored slug. */
-  restoreResume: (id: string) => invoke<string>("restore_resume", { id }),
+  archiveResume: (slug: string) => invoke<ResumeSummary>("archive_resume", { slug }),
+  /** Back from the archive as a draft. */
+  restoreResume: (slug: string) => invoke<ResumeSummary>("restore_resume", { slug }),
+  /** Erases the resume for good. */
+  deleteResume: (slug: string) => invoke<void>("delete_resume", { slug }),
   readPosting: (slug: string) => invoke<TextFile>("read_posting", { slug }),
   writePosting: (slug: string, content: string, expectedHash?: string) =>
     invoke<TextFile>("write_posting", { slug, content, expectedHash }),
@@ -95,7 +130,15 @@ export const api = {
   savePdf: (slug: string) => invoke<string | null>("save_pdf", { slug }),
   printResume: (slug: string) => invoke<void>("print_resume", { slug }),
   listSkills: () => invoke<Skill[]>("list_skills"),
-  installSkills: () => invoke<string>("install_skills"),
+  licenses: () => invoke<Licenses>("licenses"),
+  /** Resolves to the newer release, or null when this is the latest. */
+  checkUpdate: () => invoke<UpdateInfo | null>("check_update"),
+  /** Installs what the last check found, then restarts into it (on Windows the installer does). */
+  installUpdate: (onProgress: (p: Progress) => void) => {
+    const channel = new Channel<Progress>();
+    channel.onmessage = onProgress;
+    return invoke<void>("install_update", { onProgress: channel });
+  },
 };
 
 export const isConflict = (e: unknown) => String(e).startsWith("conflict");

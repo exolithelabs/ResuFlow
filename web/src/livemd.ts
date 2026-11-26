@@ -1,6 +1,8 @@
 // Live-preview Markdown on CodeMirror 6, in the spirit of Obsidian.
 // The text stays plain Markdown. Formatting renders in place, and the raw syntax
-// (##, **, [](), -, ---) shows only on the lines the cursor is on. Everything on the page,
+// shows only where the cursor is: block syntax (##, -, ---) on the cursor's lines, inline
+// syntax (**, `, [](), <Text>) only while the cursor touches that span, so it folds away as
+// soon as you type past the closing mark. Everything on the page,
 // the header included, is this one text: Markdown plus the two MDX styling components that
 // render.rs prints, <Text color underline underlineColor size caps spacing font>…</Text> and <Rule color />.
 
@@ -201,6 +203,9 @@ function build(view: EditorView, reveal: boolean, header: boolean): DecorationSe
     }
   }
   const isActive = (pos: number) => active.has(doc.lineAt(pos).number);
+  // Inline syntax shows while the selection touches its span, the edges included.
+  const touches = (from: number, to: number) =>
+    reveal && view.hasFocus && state.selection.ranges.some((r) => r.from <= to && r.to >= from);
   // The end of a mark plus the single space after it ("## ", "- "), so both hide together.
   const withSpace = (to: number) => (doc.sliceString(to, to + 1) === " " ? to + 1 : to);
   const out: Range<Decoration>[] = [];
@@ -219,15 +224,18 @@ function build(view: EditorView, reveal: boolean, header: boolean): DecorationSe
     if (isActive(from)) out.push(mark("md-mark").range(from, to));
     else out.push(lineDeco("md-hr").range(doc.lineAt(from).from), rule(css).range(from, to));
   };
-  // Component tags hide like other syntax, and show faded on the cursor's line.
-  const tag = (from: number, to: number) => {
-    out.push((isActive(from) ? mark("md-mark") : hide).range(from, to));
+  // Component tags hide like other syntax, and show faded while the cursor is in their span.
+  const tag = (from: number, to: number, shown: boolean) => {
+    out.push((shown ? mark("md-mark") : hide).range(from, to));
   };
-  // <Text> spans waiting for their </Text>: where the styled words start, and where their block ends.
-  let open: { from: number; css: string; end: number }[] = [];
+  // <Text> spans waiting for their </Text>: the tag, where the styled words start, and where their block ends.
+  let open: { tag: number; from: number; css: string; end: number }[] = [];
   const style = (from: number, to: number, css: string) => css && to > from && out.push(styled(css).range(from, to));
   const closeBefore = (pos: number) => {
-    for (const o of open.filter((o) => o.end <= pos)) style(o.from, o.end, o.css);
+    for (const o of open.filter((o) => o.end <= pos)) {
+      style(o.from, o.end, o.css);
+      tag(o.tag, o.from, touches(o.tag, o.end));
+    }
     open = open.filter((o) => o.end > pos);
   };
 
@@ -254,8 +262,11 @@ function build(view: EditorView, reveal: boolean, header: boolean): DecorationSe
           if (node.to > node.from) out.push(mark(INLINE[name]).range(node.from, node.to));
         } else if (SYNTAX.has(name)) {
           // In a link only the brackets and URL hide; a bare autolink keeps its URL.
-          if (name === "URL" && node.node.parent?.name !== "Link") return;
-          if (!isActive(node.from) && node.to > node.from) out.push(hide.range(node.from, node.to));
+          const parent = node.node.parent;
+          if (name === "URL" && parent?.name !== "Link") return;
+          // A quote's > is block syntax; the rest belong to the inline span around them.
+          const shown = name === "QuoteMark" || !parent ? isActive(node.from) : touches(parent.from, parent.to);
+          if (!shown && node.to > node.from) out.push(hide.range(node.from, node.to));
         } else if (name === "ListItem") {
           out.push(lineDeco("md-li").range(doc.lineAt(node.from).from));
         } else if (name === "ListMark") {
@@ -275,15 +286,17 @@ function build(view: EditorView, reveal: boolean, header: boolean): DecorationSe
           if (c.kind === "text") {
             let block = node.node.parent;
             while (block && !TEXT_BLOCK.test(block.name)) block = block.parent;
-            open.push({ from: node.to, css: c.css, end: block ? block.to : doc.lineAt(node.to).to });
-            return tag(node.from, node.to);
+            open.push({ tag: node.from, from: node.to, css: c.css, end: block ? block.to : doc.lineAt(node.to).to });
+            return;
           }
           const o = open.pop();
           if (!o) return; // a stray </Text> prints as text
           style(o.from, node.from, o.css);
-          tag(node.from, node.to);
+          const shown = touches(o.tag, node.to);
+          tag(o.tag, o.from, shown);
+          tag(node.from, node.to, shown);
         } else if (name === "Escape") {
-          if (!isActive(node.from)) out.push(hide.range(node.from, node.from + 1));
+          if (!touches(node.from, node.to)) out.push(hide.range(node.from, node.from + 1));
         } else if (BLOCK_LINES[name]) {
           eachLine(node.from, node.to, BLOCK_LINES[name]);
           if (name !== "Blockquote") return false;

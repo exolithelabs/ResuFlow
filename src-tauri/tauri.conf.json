@@ -25,7 +25,59 @@
     }
   },
   "bundle": {
-    "active": false,
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png", "icons/icon.ico"]
+    "active": true,
+    "targets": [
+      "appimage",
+      "nsis",
+      "app",
+      "dmg"
+    ],
+    "createUpdaterArtifacts": true,
+    "publisher": "Dhiraj Yadav",
+    "copyright": "Copyright 2026 Dhiraj Yadav. Licensed under the Apache License, Version 2.0.",
+    "license": "Apache-2.0",
+    "licenseFile": "../LICENSE",
+    "homepage": "https://github.com/exolithelabs/ResuFlow",
+    "category": "Productivity",
+    "shortDescription": "Local-first resume builder with an MCP server for AI agents",
+    "longDescription": "Write resumes as plain Markdown on your own computer, alone or with your AI agent. ResuFlow is a desktop app and a local stdio MCP server in one binary.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../LICENSE": "LICENSE",
+      "../NOTICE": "NOTICE",
+      "../THIRD_PARTY_LICENSES.md": "THIRD_PARTY_LICENSES.md"
+    },
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "displayLanguageSelector": false
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYyNkJFODFGQzg5N0IwNEUKUldST3NKZklIK2hyWW9ITCs2elVWc3VjSS9oZzU0QzZKWXkzeE0xRUIzVDNWOTNQL2lHd1gyb24K",
+      "endpoints": [
+        "https://github.com/exolithelabs/ResuFlow/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

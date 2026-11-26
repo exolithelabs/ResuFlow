@@ -1,10 +1,10 @@
-// Workspace views: the default template, instructions, built-in skills, connecting an agent, and the trash.
+// Workspace views: the default template, instructions, built-in skills, connecting an agent, the archive, and about.
 
-import { api, type Skill, type TrashEntry } from "./api";
+import { api, type Licenses, type Skill, type ThirdParty, type ThirdPartyPackage, type UpdateInfo } from "./api";
 import { attachEditMenu } from "./editmenu";
 import { createLiveEditor } from "./livemd";
 import { app, store, type Route, type View } from "./store";
-import { $, Autosave, copyText, h, icon, paintSaveState, relTime, showError, toast } from "./ui";
+import { $, Autosave, copyText, h, icon, paintSaveState, plural, relTime, toast } from "./ui";
 
 /** A conflict banner with "load theirs" and "keep mine". */
 function conflictBanner(banner: HTMLElement, message: string, theirs: () => Promise<void>, mine: () => Promise<void>) {
@@ -187,15 +187,6 @@ export class SkillsView implements View {
 
   constructor() {
     this.viewer.setReadOnly(true);
-    $("skill-copy").onclick = (e) => this.current && void copyText(e.currentTarget as HTMLElement, this.current.content);
-    $("install-skills").onclick = async () => {
-      try {
-        const dir = await api.installSkills();
-        toast(`Installed ${this.skills.length} skills in ${dir}`);
-      } catch (e) {
-        showError(e);
-      }
-    };
   }
 
   async show(route: Route) {
@@ -246,26 +237,31 @@ export class ConnectView implements View {
   async onDiskChange() {}
 }
 
-// ================================================================ trash
+// ================================================================ archive
 
-export class TrashView implements View {
-  section = $("view-trash");
+export class ArchiveView implements View {
+  section = $("view-archive");
 
   async show() {
-    await this.render();
+    this.render();
   }
 
-  private async render(entries?: TrashEntry[]) {
-    entries ??= await api.listTrash();
-    $("count-trash").textContent = entries.length ? String(entries.length) : "";
-    $("trash-list").replaceChildren(
-      ...entries.map((t) =>
+  /** Reads `store.resumes`, which main.ts refreshes before calling this. */
+  render() {
+    const archived = store.resumes.filter((r) => r.status === "archived");
+    $("archive-list").replaceChildren(
+      ...archived.map((r) =>
         h(
           "li",
-          { class: "trash-item" },
-          icon("doc"),
-          h("div", {}, h("strong", {}, t.title), h("span", {}, `Deleted ${relTime(t.deleted_ms)} · ${t.slug}`)),
-          h("button", { class: "btn small", type: "button", onclick: () => void restore(t) }, icon("restore"), "Restore"),
+          { class: "archive-item" },
+          h(
+            "button",
+            { class: "archive-open", type: "button", title: `Open ${r.title}`, onclick: () => void app.navigate({ kind: "resume", slug: r.slug }) },
+            icon("doc"),
+            h("div", {}, h("strong", {}, r.title), h("span", {}, `Edited ${relTime(r.updated_ms)} · ${r.slug}`)),
+          ),
+          h("button", { class: "btn small", type: "button", onclick: () => void app.restore(r.slug) }, icon("restore"), "Restore"),
+          h("button", { class: "btn small danger-text", type: "button", onclick: () => void app.deleteResume(r.slug) }, icon("trash"), "Delete…"),
         ),
       ),
     );
@@ -274,20 +270,223 @@ export class TrashView implements View {
   async leave() {}
 
   async onDiskChange() {
-    const entries = await api.listTrash();
-    if (!this.section.hidden) await this.render(entries);
-    else $("count-trash").textContent = entries.length ? String(entries.length) : "";
+    if (!this.section.hidden) this.render();
   }
 }
 
-/** Bring a resume back from the trash and open it. */
-export async function restore(t: TrashEntry) {
+// ================================================================ about: version, updates, licenses
+
+const AUTO_UPDATE_KEY = "resuflow.checkForUpdates";
+
+type LicenseDoc = "license" | "notice" | "third_party";
+
+/** A per-device preference, so it lives in the webview, not the data folder. On by default. */
+function autoUpdate(): boolean {
   try {
-    const slug = await api.restoreResume(t.id);
-    await app.refreshList();
-    await app.navigate({ kind: "resume", slug });
-    toast(slug === t.slug ? `Restored "${t.title}".` : `Restored "${t.title}" as ${slug}.`);
-  } catch (e) {
-    showError(e);
+    return localStorage.getItem(AUTO_UPDATE_KEY) !== "off";
+  } catch {
+    return true;
   }
+}
+
+export class AboutView implements View {
+  section = $("view-about");
+  private status = $("update-status");
+  private checkBtn = $<HTMLButtonElement>("update-check");
+  private installBtn = $<HTMLButtonElement>("update-install");
+  private found: UpdateInfo | null = null;
+  private licenses: Licenses | null = null;
+  private busy = false;
+
+  constructor() {
+    this.checkBtn.onclick = () => void this.check(true);
+    this.installBtn.onclick = () => void this.install();
+    const auto = $<HTMLInputElement>("update-auto");
+    auto.checked = autoUpdate();
+    auto.onchange = () => {
+      try {
+        localStorage.setItem(AUTO_UPDATE_KEY, auto.checked ? "on" : "off");
+      } catch {
+        /* storage unavailable: the default stays */
+      }
+    };
+    for (const b of this.section.querySelectorAll<HTMLButtonElement>("[data-license]")) {
+      b.onclick = () => void this.showLicense(b.dataset.license as LicenseDoc);
+    }
+  }
+
+  async show() {
+    const info = store.info!;
+    $("about-version").textContent = info.version;
+    $("about-license").textContent = info.license;
+    $("about-root").textContent = info.root;
+    $("about-format").textContent = String(info.format);
+    this.paint();
+  }
+
+  /** On start: check quietly, and only speak up when there is something to install. */
+  async startupCheck() {
+    if (!store.info!.updates || !autoUpdate()) return;
+    try {
+      const u = await this.check(false);
+      if (u) toast(`ResuFlow ${u.version} is available.`, { action: { label: "View", run: () => app.navigate({ kind: "about" }) } });
+    } catch {
+      /* offline, or GitHub unreachable: try again next start */
+    }
+  }
+
+  private async check(manual: boolean): Promise<UpdateInfo | null> {
+    if (this.busy) return this.found;
+    this.busy = true;
+    this.paint("Checking for updates…");
+    let message: string | undefined;
+    try {
+      this.found = await api.checkUpdate();
+      if (!this.found) message = `You have the latest version (${store.info!.version}).`;
+      return this.found;
+    } catch (e) {
+      message = String(e).replace(/^Error: /, "");
+      if (!manual) throw e;
+      return null;
+    } finally {
+      this.busy = false;
+      this.paint(message);
+    }
+  }
+
+  private async install() {
+    if (!this.found || this.busy) return;
+    this.busy = true;
+    this.paint(`Downloading ResuFlow ${this.found.version}…`);
+    const bar = $("update-progress");
+    const fill = bar.querySelector("span")!;
+    fill.style.width = "0";
+    bar.hidden = false;
+    try {
+      await app.saveAll(); // nothing unsaved is lost when the app restarts
+      await api.installUpdate((p) => {
+        if (p.total) fill.style.width = `${Math.min(100, (p.done / p.total) * 100)}%`;
+      });
+      this.paint("Restarting…"); // the app restarts (or, on Windows, the installer takes over)
+    } catch (e) {
+      bar.hidden = true;
+      this.busy = false;
+      this.paint(String(e).replace(/^Error: /, ""));
+    }
+  }
+
+  /** Reflect the current state; `message` replaces the status line. */
+  private paint(message?: string) {
+    const info = store.info!;
+    const f = this.found;
+    $("update-badge").textContent = f ? "Update" : "";
+    this.checkBtn.disabled = this.busy || !info.updates;
+    $("update-auto").closest("label")!.hidden = !info.updates;
+    this.installBtn.hidden = !f;
+    this.installBtn.disabled = this.busy;
+    $("update-found").hidden = !f;
+    $("update-notes").textContent = f?.notes ?? "";
+    if (message !== undefined) this.status.textContent = message;
+    else if (!info.updates) {
+      this.status.textContent = import.meta.env.DEV
+        ? "Updates are off in development builds."
+        : "This copy wasn't installed from a ResuFlow release (for example, it came from a package manager or was built from source), so update it the same way you installed it.";
+    } else if (f && !this.busy) {
+      this.status.textContent = `ResuFlow ${f.version} is available${f.date ? `, released ${f.date}` : ""}. You have ${info.version}.`;
+    } else if (!this.status.textContent) this.status.textContent = `You have ResuFlow ${info.version}.`;
+  }
+
+  private async showLicense(which: LicenseDoc) {
+    this.licenses ??= await api.licenses();
+    const body = $("license-body");
+    const open = body.dataset.showing === which && !body.hidden;
+    for (const b of this.section.querySelectorAll<HTMLElement>("[data-license]")) {
+      b.setAttribute("aria-pressed", String(!open && b.dataset.license === which));
+    }
+    body.hidden = open;
+    body.dataset.showing = which;
+    if (open) return;
+    const l = this.licenses;
+    if (which === "license") body.replaceChildren(h("pre", { class: "license-text", tabIndex: 0 }, l.license));
+    else if (which === "notice") body.replaceChildren(h("p", { class: "license-notice" }, l.notice.trim()));
+    else body.replaceChildren(...thirdParty(l.third_party));
+  }
+
+  async leave() {}
+  async onDiskChange() {}
+}
+
+/** Markdown prose from the licenses file: only `inline code` needs rendering. */
+function prose(md: string): HTMLParagraphElement {
+  return h("p", {}, ...md.split(/`([^`]+)`/).map((part, i) => (i % 2 ? h("code", {}, part) : part)));
+}
+
+/** The third-party notices: what they cover, then every package, each expanding to its license texts. */
+function thirdParty(tp: ThirdParty): Node[] {
+  const [preamble, ...sections] = tp.prose;
+  const summary = h("ul", { class: "license-summary", "aria-label": "Packages by license" },
+    ...tp.summary.map(([id, n]) => h("li", {}, h("strong", {}, id), ` ${n}`)));
+
+  const empty = h("p", { class: "hint", hidden: true }, "No package matches.");
+  const groups = tp.groups.map((g) => {
+    const items = g.packages.map((p) => thirdPartyItem(p, tp));
+    const section = h("section", { class: "dep-group" },
+      h("h3", {}, g.title, h("span", { class: "badge" }, String(g.packages.length))),
+      g.note && prose(g.note),
+      h("ul", { class: "dep-list" }, ...items));
+    return { section, items };
+  });
+
+  const filter = h("input", {
+    type: "search", placeholder: "Filter by package or license", "aria-label": "Filter packages",
+    oninput: () => {
+      const q = filter.value.trim().toLowerCase();
+      let shown = 0;
+      for (const g of groups) {
+        for (const li of g.items) li.hidden = !li.dataset.search!.includes(q);
+        const n = g.items.filter((li) => !li.hidden).length;
+        g.section.hidden = n === 0;
+        shown += n;
+      }
+      empty.hidden = shown > 0;
+    },
+  });
+
+  return [
+    ...preamble.paragraphs.map(prose),
+    summary,
+    ...sections.flatMap((s) => [h("h3", {}, s.title), ...s.paragraphs.map(prose)]),
+    h("label", { class: "search license-filter" }, icon("search"), filter),
+    ...groups.map((g) => g.section),
+    empty,
+  ];
+}
+
+function thirdPartyItem(p: ThirdPartyPackage, tp: ThirdParty): HTMLLIElement {
+  const details = h("details", {},
+    h("summary", {},
+      h("span", { class: "dep-name" }, p.name),
+      h("span", { class: "dep-version" }, p.version),
+      p.platforms && h("span", { class: "badge" }, p.platforms),
+      h("span", { class: "dep-license" }, p.used)));
+  // Texts run to hundreds of kilobytes in all, so each is only built when its package is opened.
+  details.addEventListener("toggle", () => {
+    if (!details.open || details.childElementCount > 1) return;
+    const fact = (k: string, v: string) => (v ? [h("dt", {}, k), h("dd", {}, v)] : []);
+    details.append(h("div", { class: "dep-body" },
+      h("dl", { class: "facts" },
+        ...fact("Declared license", p.declared),
+        ...fact("Used under", p.used !== p.declared ? p.used : ""),
+        ...fact("Platforms", p.platforms),
+        ...fact("Included as", p.note),
+        ...fact("Source", p.source)),
+      ...p.texts.map((i) => {
+        const t = tp.texts[i];
+        return h("div", { class: "dep-text" },
+          h("p", { class: "hint" }, t.kind, t.users > 1 ? ` · the same text covers ${plural(t.users - 1, "other package")}` : ""),
+          h("pre", { class: "license-text", tabIndex: 0 }, t.text));
+      })));
+  });
+  const search = [p.name, p.used, p.declared, p.platforms].join(" ").toLowerCase();
+  return h("li", { dataset: { search } }, details);
 }

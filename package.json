@@ -10,7 +10,9 @@
     "build": "tsc --noEmit && vite build",
     "app": "tauri dev",
     "app:build": "tauri build --no-bundle",
-    "check": "tsc --noEmit && cargo test --manifest-path src-tauri/Cargo.toml"
+    "app:bundle": "tauri build",
+    "licenses": "node scripts/licenses.mjs",
+    "check": "tsc --noEmit && node scripts/licenses.mjs --check && cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "engines": {
     "node": ">=20"

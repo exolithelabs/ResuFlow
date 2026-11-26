@@ -7,7 +7,36 @@ write in a single live-preview page (Markdown that renders as you type, like Obs
 profile and edits the same files over stdio. Both see each other's changes live. Everything is plain Markdown in
 ResuFlow's app-data folder, created automatically.
 
-There's no account, no network listener, no token and no bundled LLM.
+There's no account, no network listener, no token and no bundled LLM. The only request ResuFlow makes is the update
+check against this project's GitHub releases, which you can turn off (About → Check when ResuFlow starts).
+
+## Install
+
+Download the latest release from [GitHub Releases](https://github.com/exolithelabs/ResuFlow/releases/latest):
+
+| System | File | Notes |
+| --- | --- | --- |
+| Linux (x86_64) | `ResuFlow_<version>_amd64.AppImage` | `chmod +x` it, then run it. |
+| Windows (x86_64) | `ResuFlow_<version>_x64-setup.exe` | Installs for your user only; no admin rights needed. |
+| macOS (Apple silicon and Intel) | `ResuFlow_<version>_universal.dmg` | Drag ResuFlow to Applications. |
+
+### Updates
+
+ResuFlow checks for a new release when it starts and tells you when one is ready; **About → Check for updates** does
+it on demand. Installing saves your open edits, downloads the update, verifies its signature against the key built
+into the app (an unsigned or tampered download is refused) and restarts into the new version. Self-update works for
+the AppImage, the Windows install and the macOS app; a copy built from source or installed by a package manager is
+updated the way you installed it.
+
+An update never changes your data by itself. When a new version stores data differently, it upgrades your data
+folder the first time it opens it, safely:
+
+- it first copies the whole folder to `.backups/format-<old>-<time>/` inside it, and keeps the last five copies;
+- if the upgrade fails, or the app is closed or crashes partway through, the folder is put back exactly as it was
+  from that copy (next start, if need be);
+- the app and an agent's MCP server never upgrade at the same time;
+- an older version refuses to open, or write to, a folder a newer one has upgraded, rather than damage it. A
+  ResuFlow still running from before the update (an agent's MCP server, say) stops writing until it is restarted.
 
 ## How it fits together
 
@@ -34,13 +63,16 @@ on macOS, `%APPDATA%\resuflow` on Windows. On first run it copies resumes, the d
 
 ```text
 resuflow/
-  resuflow.json             marker
-  profile.mdx               default template, header included, copied into each new resume
-  instructions.md           rules you write; agents read them and do not change them
-  resumes/<slug>/resume.mdx one folder per variant
-  resumes/<slug>/posting.md optional: the job posting that resume targets
-  .trash/                   deleted resumes land here and can be restored; nothing is erased
+  resuflow.json              marker
+  profile.mdx                default template, header included, copied into each new resume
+  instructions.json          rules you write; agents read them and do not change them
+  resumes/<slug>/resume.mdx  one folder per variant
+  resumes/<slug>/posting.txt optional: the job posting that resume targets
 ```
+
+Opening a folder from an older version converts it in place, after taking a backup (see [Updates](#updates)):
+`instructions.md` becomes `instructions.json` and each `posting.md` becomes `posting.txt`. `resuflow.json` records
+the folder's data format.
 
 In the app, a resume is one page of Markdown that looks like the printout. All of it edits in place, Obsidian-style,
 header and section rules included: formatting renders as you type, and the raw Markdown (`#`, `**`, `---`) shows
@@ -51,7 +83,9 @@ template, or of another resume. Next to the page, a side panel shows:
   bullets, tables, leftovers from the template). Click a finding to jump to its line.
 - **Target job**: paste the posting a resume targets. ResuFlow picks out its key terms and shows which ones the
   resume covers and which are missing. Your agent sees the same posting and coverage.
-- **Details**: tags, the file on disk, duplicate and move to trash (with Undo).
+- **Details**: tags, the file on disk, duplicate and delete. Deleting asks first and erases the resume
+  for good; to put one away without losing it, archive it from the list's menu (with Undo). Archived resumes live in
+  the sidebar's Archive, where each can be restored or deleted.
 
 On disk a resume is an `.mdx` file: Markdown with a little front matter, plus two optional styling components. The body opens with the header: a `# Name` line, a
 headline line, then a contact line whose items are separated by ` · ` (emails, phone numbers and web addresses print
@@ -104,41 +138,45 @@ print, filled in from the default template where it relied on it.
 
 ## Connect an agent
 
-In the app, open **Connect an agent** (bottom of the sidebar) for a ready-to-copy config, or add this to your
-agent's MCP configuration (`resuflow mcp-config` prints it with the full path of this install):
+In the app, open **Connect an agent** (bottom of the sidebar) for a ready-to-copy config that uses the full path of
+this install. If `resuflow` is on your PATH, this works too:
 
 ```json
 { "mcpServers": { "resuflow": { "command": "resuflow", "args": ["mcp"] } } }
 ```
 
 The agent works on the same data folder as the app. The sidebar's workspace section holds the default template, your
-instructions, the built-in skills, this connection and the trash. You edit instructions; the agent only reads them.
+instructions, the built-in skills, this connection and the archive. You edit instructions; the agent only reads them.
 
-**Tools:** `get_workspace`, `read_profile`, `update_profile`, `read_instructions`, `list_resumes`,
-`read_resume`, `create_resume`, `write_resume`, `edit_resume`, `set_resume_meta`, `delete_resume`, `list_trash`,
-`restore_resume`, `read_posting`, `set_posting`, `check_resume`, `render_resume`, `read_skill`.
+Your instructions reach the agent when it connects: they are appended to the server's `initialize` instructions,
+scoped to resume work, and `get_workspace` returns the current ones.
+
+**Tools:** `get_workspace`, `read_profile`, `update_profile`, `list_resumes`, `read_resume`, `create_resume`,
+`write_resume`, `edit_resume`, `set_resume_meta`, `archive_resume`, `restore_resume`, `read_posting`,
+`set_posting`, `check_resume`, `render_resume`, `read_skill`. Agents can archive and restore resumes but never delete
+them; only you can, in the app.
+
+**Resources** (read-only Markdown): `resuflow://profile`, `resuflow://instructions`, `resuflow://resumes/{slug}` and
+`skill://{name}/SKILL.md`.
+
+**Prompts:** one per built-in skill, with an optional `slug` argument. Clients that support completion get resume
+slugs suggested for it, and for the resource templates' `{slug}` and `{name}`.
 
 ## Built-in skills
 
 ResuFlow ships four read-only writing skills: `role-research`, `impact-bullets`, `ats-pass` and `recruiter-review`.
-Agents load them over MCP (`read_skill`, or as MCP prompts). To give your agent its own copy, open
-**Skills** in the sidebar and choose **Install skills**, or run `resuflow install-skills`. They are copied into
-`~/.agents/skills`, the shared folder agents read skills from, as `resuflow-<name>`, so they never overwrite your own
-skills.
+Agents load them over MCP: `read_skill`, the MCP prompt of the same name, or the `skill://{name}/SKILL.md` resource.
 
 ## Command line
 
 ```text
-resuflow                               open the app
-resuflow mcp                           MCP server on stdio
-resuflow mcp-config                    print client config for this install
-resuflow list | check SLUG | render SLUG [-o FILE]
-resuflow pdf SLUG -o FILE              save as PDF (Linux)
-resuflow trash | restore ID            list deleted resumes, bring one back
-resuflow install-skills                copy built-in skills to ~/.agents/skills
+resuflow                   open the app
+resuflow mcp               MCP server on stdio (what your agent runs)
+resuflow --help | --version
 ```
 
-For development, `--dir DIR` or `$RESUFLOW_DIR` points any command at another folder.
+Everything else happens in the app or through your agent. For development, `--dir DIR` or `$RESUFLOW_DIR` points
+either one at another folder.
 
 ## PDF
 
@@ -167,19 +205,48 @@ Needs Node 20+, Rust stable, and [Tauri's system dependencies](https://tauri.app
 ```bash
 npm install
 npm run app            # desktop app with hot reload
-npm run check          # typecheck + Rust tests
+npm run check          # typecheck + license audit + Rust tests
 npm run app:build      # release binary → src-tauri/target/release/resuflow
+npm run app:bundle     # installer for this OS (needs the updater signing key, see Release)
+npm run licenses       # regenerate THIRD_PARTY_LICENSES.md after changing dependencies
 ```
 
 To use the release binary everywhere, put it on your PATH, for example
 `ln -s "$PWD/src-tauri/target/release/resuflow" ~/.local/bin/resuflow`.
 
-Layout: `src-tauri/src/` holds the Rust core (`workspace`, `doc`, `render`, `lint`, `skills`), the MCP server (`mcp`), the
-desktop shell (`app`) and the CLI (`main`). `web/src/` holds the UI in vanilla TypeScript: `main.ts` (sidebar, routing,
-live reload), `resume.ts` (the resume page and side panel), `views.ts` (template, instructions, skills, connect, trash),
+Layout: `src-tauri/src/` holds the Rust core (`workspace`, `config`, `doc`, `render`, `lint`, `skills`, `about`), the MCP server (`mcp`), the
+desktop shell (`app`, with `pdf` for direct export) and `main`, which only picks between the app and the MCP
+server. `web/src/` holds the UI in vanilla TypeScript: `main.ts` (sidebar, routing,
+live reload), `resume.ts` (the resume page and side panel), `views.ts` (template, instructions, skills, connect, archive, about and updates),
 `livemd.ts` (the CodeMirror 6 live-preview editor), `editmenu.ts` (its right-click formatting menu) and `ui.ts` (helpers, toasts, hash-guarded autosave). `skills/` holds
 the built-in skills, which are compiled into the binary.
 
+### Release
+
+1. Set the same version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`, and run
+   `npm run check`.
+2. Tag and push: `git tag v0.3.0 && git push origin v0.3.0`.
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) checks the versions match, runs the checks, builds
+the AppImage, the Windows installer and a universal macOS app and DMG into a draft release, and publishes it only
+when every platform built and the updater manifest (`latest.json`) lists a signed update for each. Installed copies
+look for updates in the latest published release.
+
+Updates are signed with a minisign key. Its public half is `plugins.updater.pubkey` in `tauri.conf.json`; the
+private half goes in the repository secret `TAURI_SIGNING_PRIVATE_KEY` (and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+if it has one). Keep a safe copy of it: if it is lost, installed copies can no longer be updated and users have to
+reinstall once. To bundle locally, export the same variables. macOS builds are ad-hoc signed unless the optional
+`APPLE_*` secrets listed in the workflow are set, in which case they are signed and notarized.
+
+### Dependencies and licenses
+
+Only dependencies under the permissive licenses (and MPL-2.0) allowed in [`scripts/licenses.mjs`](scripts/licenses.mjs)
+may be added. `npm run check`, and so CI, fails when a dependency's license isn't allowed or when
+[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) is out of date; `npm run licenses` regenerates it. The file is
+compiled into the app (About → Licenses) and installed next to it.
+
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+ResuFlow is licensed under the Apache License, Version 2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE). It is built
+on open-source packages under their own licenses, listed with their full texts in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

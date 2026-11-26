@@ -18,4 +18,4 @@ Report back as:
 3. **Cut list**: lines that don't earn their space for this target.
 4. **Questions** for the user, about facts only they know (numbers, scope, outcomes).
 
-Don't edit the file during a review unless the user asks. When they accept fixes, apply them with `edit_resume`. Lasting preferences belong in Instructions, which only the user edits in the app. Read them with `read_instructions` and follow them. Tell the user when a preference should be added there.
+Don't edit the file during a review unless the user asks. When they accept fixes, apply them with `edit_resume`. Lasting preferences belong in Instructions, which only the user edits in the app. Read them with `get_workspace` and follow them. Tell the user when a preference should be added there.

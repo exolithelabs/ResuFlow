@@ -45,6 +45,7 @@ const PATHS = {
   target: "M8 14.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13zM8 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM8 8h.01",
   duplicate: "M5.5 5.5h8v8h-8zM10.5 5.5v-3h-8v8h3M9.5 7.5v4M7.5 9.5h4",
   archive: "M1.5 2.5h13v3h-13zM2.5 5.5v8h11v-8M6 8.5h4",
+  info: "M8 14.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13zM8 7.5v4M8 5h.01",
 } as const;
 export type IconName = keyof typeof PATHS;
 

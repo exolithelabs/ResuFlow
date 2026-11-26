@@ -1,4 +1,4 @@
-//! Resume MDX → print-ready A4 HTML. One renderer serves printing, PDF export, the CLI and MCP.
+//! Resume MDX → print-ready A4 HTML. One renderer serves printing, PDF export and MCP.
 //!
 //! Resumes are `.mdx`: ordinary Markdown plus two styling components, parsed here and never run.
 //!
