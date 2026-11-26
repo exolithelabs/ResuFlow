@@ -180,7 +180,15 @@ function standardText(id, pkg, library) {
 // ---- packages ----------------------------------------------------------------------
 
 const repoUrl = (r) => (typeof r === "object" ? r?.url : r)?.replace(/^git\+/, "").replace(/\.git$/, "").replace(/^git:\/\//, "https://") || "";
-const stripEmail = (a) => a.replace(/\s*<[^<>]*>/g, "").replace(/[<>]/g, "").trim();
+const stripEmail = (a) => {
+  // Repeat until stable so no `<...>` survives a single pass, then drop any unpaired brackets.
+  let prev;
+  do {
+    prev = a;
+    a = a.replace(/\s*<[^<>]*>/g, "");
+  } while (a !== prev);
+  return a.replace(/[<>]/g, "").trim();
+};
 
 function rustPackages() {
   const byId = new Map();
