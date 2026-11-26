@@ -11,6 +11,7 @@
     "app": "tauri dev",
     "app:build": "tauri build --no-bundle",
     "app:bundle": "tauri build",
+    "tauri": "tauri",
     "licenses": "node scripts/licenses.mjs",
     "check": "tsc --noEmit && node scripts/licenses.mjs --check && cargo test --manifest-path src-tauri/Cargo.toml"
   },
