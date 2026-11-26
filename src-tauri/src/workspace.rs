@@ -3,9 +3,9 @@
 //! ```text
 //! <workspace>/
 //!   resuflow.json              marker file
-//!   profile.md                 default template: header fields (front matter) + body copied into new resumes
+//!   profile.mdx                default template: copied into each new resume
 //!   instructions.md            rules the user writes; agents read them and never change them
-//!   resumes/<slug>/resume.md   one folder per resume
+//!   resumes/<slug>/resume.mdx  one folder per resume: Markdown plus styling components
 //!   resumes/<slug>/posting.md  optional: the job posting this resume targets
 //!   .trash/<slug>-<ms>/        deleted resumes, restorable; nothing is erased
 //! ```
@@ -25,8 +25,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const STATUSES: [&str; 4] = ["draft", "ready", "sent", "archived"];
 
-/// Front matter fields printed in the resume header. A resume's own value wins over the template's.
-pub const HEADER_FIELDS: [&str; 6] = ["name", "headline", "email", "phone", "location", "links"];
+/// Front matter fields that held the resume header before format 3 (see [`migrate_header`]).
+const LEGACY_HEADER_FIELDS: [&str; 6] = ["name", "headline", "email", "phone", "location", "links"];
+
+/// Written to `resuflow.json`. Format 3 keeps the header and section rules in the Markdown body;
+/// format 4 names resumes and the template `.mdx` (Markdown plus the components in `render.rs`).
+const MARKER: &str = "{\n  \"app\": \"resuflow\",\n  \"format\": 4\n}\n";
+
+/// A resume's source file inside `resumes/<slug>/` (and inside a trashed resume's folder).
+pub const RESUME_FILE: &str = "resume.mdx";
+/// The default template, at the workspace root.
+pub const PROFILE_FILE: &str = "profile.mdx";
 
 #[derive(Debug)]
 pub struct Error(pub String);
@@ -123,28 +132,39 @@ pub struct Workspace {
     pub root: PathBuf,
 }
 
-/// Body copied into a new resume when the template body is empty. Also the body of a fresh profile.md.
-pub const RESUME_TEMPLATE: &str = "## Summary
+/// Body copied into a new resume when the template body is empty. Also the body of a fresh profile.mdx.
+/// The header is the `# ` name line and the lines under it (see `render::split_header`). Its look
+/// is written out as `<Text>` styling, the same that "Apply resume style" in the editor adds
+/// (`livemd.ts` RESUME_STYLE), so nothing about it is hidden.
+pub const RESUME_TEMPLATE: &str = r##"# Your Name
+<Text color="#555b66" size="11.5pt">What you do, in one line</Text>
+<Text color="#555b66" size="9.5pt">City, Country · you@example.com · +00 00000 00000 · linkedin.com/in/you · github.com/you</Text>
+
+## <Text color="#1f4e8c" size="10pt" caps spacing="0.08em">Summary</Text>
+---
 
 Two or three lines aimed at this role.
 
-## Experience
+## <Text color="#1f4e8c" size="10pt" caps spacing="0.08em">Experience</Text>
+---
 
 ### Role — Company
-*Start – End · Location*
+<Text color="#555b66" size="9.5pt">*Start – End · Location*</Text>
 
 - Achievement with a measurable result.
 
-## Skills
+## <Text color="#1f4e8c" size="10pt" caps spacing="0.08em">Skills</Text>
+---
 
 - Languages:
 - Tools:
 
-## Education
+## <Text color="#1f4e8c" size="10pt" caps spacing="0.08em">Education</Text>
+---
 
 ### Degree — Institution
-*Year*
-";
+<Text color="#555b66" size="9.5pt">*Year*</Text>
+"##;
 
 /// The stock memory.md of format 1, recognised so migrating it does not keep the boilerplate as a rule.
 const LEGACY_MEMORY: &str = "# Memory
@@ -160,18 +180,58 @@ impl Workspace {
         if !root.is_dir() {
             bail!("workspace folder does not exist: {}", root.display());
         }
-        Ok(Workspace { root: root.canonicalize()? })
+        let ws = Workspace { root: root.canonicalize()? };
+        ws.migrate()?;
+        Ok(ws)
     }
 
     /// Create a workspace, or fill in what is missing. Never overwrites existing files.
     pub fn init(root: impl Into<PathBuf>) -> Result<Workspace> {
         let root = root.into();
         fs::create_dir_all(root.join("resumes"))?;
-        create_new(&root.join("resuflow.json"), "{\n  \"app\": \"resuflow\",\n  \"format\": 2\n}\n")?;
-        create_new(&root.join("profile.md"), &default_profile())?;
+        // Files without a marker (an import from an older version) are migrated by `open`;
+        // only an empty folder starts out in the current format.
+        let empty = !root.join("profile.md").exists() && fs::read_dir(root.join("resumes"))?.next().is_none();
+        create_new(&root.join("resuflow.json"), if empty { MARKER } else { "{\"app\": \"resuflow\"}\n" })?;
         let ws = Workspace::open(root)?;
+        create_new(&ws.profile_path(), RESUME_TEMPLATE)?;
         ws.ensure_instructions()?;
         Ok(ws)
+    }
+
+    /// Bring an older workspace up to date, once. Format 4 renames `.md` sources to `.mdx`;
+    /// format 3 writes the header into the body and a `---` under each section heading.
+    /// Trashed resumes are converted too, so they restore in the current format.
+    fn migrate(&self) -> Result<()> {
+        let marker = self.root.join("resuflow.json");
+        let format = fs::read_to_string(&marker)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v["format"].as_u64())
+            .unwrap_or(0);
+        if format >= 4 {
+            return Ok(());
+        }
+        let mut dirs: Vec<PathBuf> = self.slugs().iter().map(|s| self.root.join("resumes").join(s)).collect();
+        if let Ok(entries) = fs::read_dir(self.root.join(".trash")) {
+            dirs.extend(entries.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
+        }
+        // Format 4: the same text under its new name. An .mdx already there wins.
+        for (dir, old, new) in dirs.iter().map(|d| (d.as_path(), "resume.md", RESUME_FILE)).chain([(self.root.as_path(), "profile.md", PROFILE_FILE)]) {
+            if dir.join(old).is_file() && !dir.join(new).exists() {
+                fs::rename(dir.join(old), dir.join(new))?;
+            }
+        }
+        if format < 3 {
+            let profile = self.profile();
+            for path in dirs.iter().map(|d| d.join(RESUME_FILE)).filter(|p| p.is_file()) {
+                migrate_file(&path, Some(&profile))?;
+            }
+            if self.profile_path().is_file() {
+                migrate_file(&self.profile_path(), None)?;
+            }
+        }
+        atomic_write(&marker, MARKER)
     }
 
     pub fn is_workspace(dir: &Path) -> bool {
@@ -186,7 +246,7 @@ impl Workspace {
     }
 
     fn resume_path(&self, slug: &str) -> Result<PathBuf> {
-        Ok(self.resume_dir(slug)?.join("resume.md"))
+        Ok(self.resume_dir(slug)?.join(RESUME_FILE))
     }
 
     fn existing_resume(&self, slug: &str) -> Result<PathBuf> {
@@ -201,7 +261,7 @@ impl Workspace {
     pub fn list_resumes(&self) -> Result<Vec<ResumeSummary>> {
         let mut out = Vec::new();
         for slug in self.slugs() {
-            let path = self.root.join("resumes").join(&slug).join("resume.md");
+            let path = self.root.join("resumes").join(&slug).join(RESUME_FILE);
             if let Ok(text) = fs::read_to_string(&path) {
                 out.push(self.summarize(&slug, &text, &path));
             }
@@ -245,7 +305,6 @@ impl Workspace {
             (None, Some(src)) => Doc::parse(&self.read_resume(src)?.content),
             (None, None) => Doc { meta: vec![], body: self.template_body() },
         };
-        self.fill_header(&mut doc);
         doc.set("title", Value::Str(title.into()));
         if new.from.is_some() {
             doc.set("status", Value::Str(String::new())); // a copy starts over as a draft
@@ -352,7 +411,7 @@ impl Workspace {
             .filter_map(|e| {
                 let id = e.file_name().to_string_lossy().into_owned();
                 let (slug, ms) = parse_trash_id(&id).ok()?;
-                let text = fs::read_to_string(e.path().join("resume.md")).ok()?;
+                let text = fs::read_to_string(e.path().join(RESUME_FILE)).ok()?;
                 Some(TrashEntry { title: title_of(&Doc::parse(&text), &slug), id, slug, deleted_ms: ms })
             })
             .collect();
@@ -364,7 +423,7 @@ impl Workspace {
     pub fn restore_resume(&self, id: &str) -> Result<ResumeFile> {
         let (slug, _) = parse_trash_id(id)?;
         let from = self.root.join(".trash").join(id);
-        if !from.join("resume.md").is_file() {
+        if !from.join(RESUME_FILE).is_file() {
             bail!("nothing in the trash with id '{id}'");
         }
         let slug = self.unique_slug(&slug);
@@ -382,18 +441,6 @@ impl Workspace {
             n += 1;
         }
         slug
-    }
-
-    /// Copy header fields the resume does not set itself from the default template.
-    fn fill_header(&self, doc: &mut Doc) {
-        let profile = self.profile();
-        for key in HEADER_FIELDS {
-            if doc.get(key).is_none() {
-                if let Some(v) = profile.get(key) {
-                    doc.set(key, v.clone());
-                }
-            }
-        }
     }
 
     /// Body of the default template; an empty one falls back to the built-in skeleton.
@@ -441,7 +488,7 @@ impl Workspace {
     // ---- profile & instructions ----------------------------------------------
 
     fn profile_path(&self) -> PathBuf {
-        self.root.join("profile.md")
+        self.root.join(PROFILE_FILE)
     }
 
     fn instructions_path(&self) -> PathBuf {
@@ -581,7 +628,7 @@ impl Workspace {
         visit(&self.root.join(".trash"));
         for slug in self.slugs() {
             let dir = self.root.join("resumes").join(slug);
-            visit(&dir.join("resume.md"));
+            visit(&dir.join(RESUME_FILE));
             visit(&dir.join("posting.md"));
         }
         format!("{:016x}", h.0)
@@ -590,29 +637,78 @@ impl Workspace {
 
 // ---- helpers -----------------------------------------------------------------
 
-fn default_profile() -> String {
-    format!(
-        "---
-name: Your Name
-headline: What you do, in one line
-email: you@example.com
-phone: \"+00 00000 00000\"
-location: City, Country
-links: [linkedin.com/in/you, github.com/you]
----
+fn migrate_file(path: &Path, fallback: Option<&Doc>) -> Result<()> {
+    let before = fs::read_to_string(path)?;
+    let mut doc = Doc::parse(&before);
+    migrate_header(&mut doc, fallback);
+    doc.body = rule_sections(&doc.body);
+    let after = doc.to_string();
+    if after != before {
+        atomic_write(path, &after)?;
+    }
+    Ok(())
+}
 
-{RESUME_TEMPLATE}"
-    )
+/// Format 2 kept the header in front matter, with fields a resume left out taken from the
+/// template. Write the header it printed as Markdown at the top of the body instead.
+fn migrate_header(doc: &mut Doc, fallback: Option<&Doc>) {
+    let pick = |k: &str| doc.str(k).or_else(|| fallback.and_then(|p| p.str(k))).unwrap_or_default();
+    let (name, headline) = (pick("name"), pick("headline"));
+    let mut contact: Vec<String> = ["location", "email", "phone"].iter().map(|k| pick(k)).filter(|v| !v.is_empty()).collect();
+    contact.extend(if doc.get("links").is_some() { doc.list("links") } else { fallback.map(|p| p.list("links")).unwrap_or_default() });
+
+    let mut header = String::new();
+    if !doc.body.trim_start().starts_with("# ") {
+        if !name.is_empty() {
+            header.push_str(&format!("# {name}\n"));
+        }
+        if !headline.is_empty() {
+            header.push_str(&format!("{headline}\n"));
+        }
+        if !contact.is_empty() {
+            header.push_str(&format!("{}\n", contact.join(" · ")));
+        }
+    }
+    for k in LEGACY_HEADER_FIELDS {
+        doc.set(k, Value::Str(String::new()));
+    }
+    if !header.is_empty() {
+        doc.body = format!("{header}\n{}", doc.body.trim_start_matches(['\r', '\n']));
+    }
+}
+
+/// Section headings used to draw their own underline. Make each one a `---` the user can edit.
+fn rule_sections(body: &str) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    let mut out = String::with_capacity(body.len() + 64);
+    let mut fenced = false;
+    for (i, line) in lines.iter().enumerate() {
+        out.push_str(line);
+        out.push('\n');
+        let t = line.trim();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            fenced = !fenced;
+        }
+        let ruled = lines.get(i + 1).is_some_and(|n| {
+            n.trim() == "---" || matches!(crate::render::component(n), Some(crate::render::Component::Rule(_)))
+        });
+        if !fenced && t.starts_with("## ") && !ruled {
+            out.push_str("---\n");
+        }
+    }
+    if !body.ends_with('\n') {
+        out.pop();
+    }
+    out
 }
 
 fn title_of(d: &Doc, slug: &str) -> String {
-    d.str("title")
-        .or_else(|| d.body.lines().find_map(|l| l.strip_prefix("# ").map(|t| t.trim().to_string())))
-        .unwrap_or_else(|| slug.to_string())
+    d.str("title").unwrap_or_else(|| slug.to_string())
 }
 
 pub fn count_words(text: &str) -> usize {
-    text.split_whitespace().filter(|w| w.chars().any(char::is_alphanumeric)).count()
+    crate::render::strip_components(text)
+        .split_whitespace().filter(|w| w.chars().any(char::is_alphanumeric)).count()
 }
 
 /// Names that become paths: lowercase letters, digits and dashes, at most 64 bytes.
@@ -789,11 +885,12 @@ pub(crate) mod tests {
         assert_eq!(r.summary.tags, vec!["rust"]);
         assert_eq!(r.summary.status, "draft");
         assert!(!r.content.contains("status:"));
-        assert!(r.content.contains("name: Your Name"));
+        assert!(r.content.contains("\n# Your Name\n"));
+        assert!(!r.content.contains("name:"));
 
-        let r2 = ws.edit_resume(&r.summary.slug, "## Summary", "## Profile", Some(&r.hash)).unwrap();
-        assert!(r2.content.contains("## Profile"));
-        assert!(ws.edit_resume(&r.summary.slug, "## Profile", "## X", Some(&r.hash)).unwrap_err().0.starts_with("conflict"));
+        let r2 = ws.edit_resume(&r.summary.slug, "Two or three lines aimed at this role.", "Profile.", Some(&r.hash)).unwrap();
+        assert!(r2.content.contains("\nProfile.\n"));
+        assert!(ws.edit_resume(&r.summary.slug, "Profile.", "X", Some(&r.hash)).unwrap_err().0.starts_with("conflict"));
         assert!(ws.edit_resume(&r.summary.slug, "- ", "* ", None).unwrap_err().0.contains("times"));
 
         let r3 = ws.set_meta(&r.summary.slug, None, Some("ready"), Some(vec!["Rust".into(), "rust".into(), " ".into()]), None).unwrap();
@@ -849,24 +946,24 @@ pub(crate) mod tests {
         let t = TempWs::new();
         let ws = &t.0;
         let p = ws.read_parts(&Target::Profile).unwrap();
-        let p2 = ws.write_body(&Target::Profile, "New notes\n", Some(&p.hash)).unwrap();
-        assert_eq!(p2.body, "New notes\n");
-        assert_eq!(p2.fields["name"], "Your Name");
+        assert!(p.fields.is_empty());
+        assert!(p.body.starts_with("# Your Name\n"));
+        let p2 = ws.write_body(&Target::Profile, "# Ada\nNew notes\n", Some(&p.hash)).unwrap();
+        assert_eq!(p2.body, "# Ada\nNew notes\n");
 
         let mut f = serde_json::Map::new();
-        f.insert("name".into(), "Ada".into());
+        f.insert("note".into(), "kept".into());
         f.insert("links".into(), serde_json::json!(["a.dev", ""]));
         f.insert("phone".into(), serde_json::Value::Null);
         let p3 = ws.set_fields(&Target::Profile, &f, Some(&p2.hash)).unwrap();
-        assert_eq!(p3.fields["name"], "Ada");
+        assert_eq!(p3.fields["note"], "kept");
         assert_eq!(p3.fields["links"], serde_json::json!(["a.dev"]));
         assert!(p3.fields.get("phone").is_none());
         assert_eq!(p3.body_offset, p3.fields.len() + 3);
 
         let fresh = create(ws, "From the template");
-        assert!(fresh.content.contains("New notes"));
-        assert!(fresh.content.contains("name: Ada"));
-        assert!(fresh.content.contains("links: [a.dev]"));
+        assert!(fresh.content.contains("# Ada\nNew notes"));
+        assert!(!fresh.content.contains("note: kept"));
 
         let mut bad = serde_json::Map::new();
         bad.insert("status".into(), "nope".into());
@@ -894,6 +991,74 @@ pub(crate) mod tests {
             assert_eq!(t.0.read_instructions().unwrap().items, expected);
             assert!(!t.0.root.join("memory.md").exists());
         }
+    }
+
+    #[test]
+    fn format_2_header_moves_into_the_body() {
+        let t = TempWs::new();
+        let root = t.0.root.clone();
+        fs::write(root.join("resuflow.json"), "{\"app\": \"resuflow\", \"format\": 2}").unwrap();
+        fs::remove_file(root.join(PROFILE_FILE)).unwrap(); // a format 2 workspace has profile.md instead
+        fs::write(
+            root.join("profile.md"),
+            "---\nname: Ada\nheadline: Engineer\nemail: a@b.c\nlinks: [a.dev]\n---\n\n## Summary\n\nText\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("resumes/own")).unwrap();
+        fs::write(root.join("resumes/own/resume.md"), "---\ntitle: Own\nheadline: Data person\nlocation: Leeds\n---\n## Skills\n---\n- Rust\n```\n## not a heading\n```\n").unwrap();
+        fs::create_dir_all(root.join(".trash/old-1")).unwrap();
+        fs::write(root.join(".trash/old-1/resume.md"), "---\ntitle: Old\n---\n## Work\n## Ruled\n<Rule color=\"red\" />\n").unwrap();
+
+        let ws = Workspace::open(&root).unwrap();
+        assert!(!root.join("profile.md").exists() && !root.join("resumes/own/resume.md").exists());
+        assert_eq!(fs::read_to_string(root.join(PROFILE_FILE)).unwrap(), "# Ada\nEngineer\na@b.c · a.dev\n\n## Summary\n---\n\nText\n");
+        assert_eq!(
+            ws.read_resume("own").unwrap().content,
+            "---\ntitle: Own\n---\n\n# Ada\nData person\nLeeds · a@b.c · a.dev\n\n## Skills\n---\n- Rust\n```\n## not a heading\n```\n"
+        );
+        let old = fs::read_to_string(root.join(".trash/old-1").join(RESUME_FILE)).unwrap();
+        assert!(old.contains("# Ada\nEngineer\n") && old.contains("## Work\n---\n## Ruled\n<Rule color=\"red\" />\n"));
+        assert!(fs::read_to_string(root.join("resuflow.json")).unwrap().contains("\"format\": 4"));
+
+        // Once migrated, opening again changes nothing.
+        let own = ws.read_resume("own").unwrap().hash;
+        assert_eq!(Workspace::open(&root).unwrap().read_resume("own").unwrap().hash, own);
+    }
+
+    #[test]
+    fn format_3_sources_become_mdx() {
+        let t = TempWs::new();
+        let root = t.0.root.clone();
+        fs::write(root.join("resuflow.json"), "{\"app\": \"resuflow\", \"format\": 3}").unwrap();
+        fs::rename(root.join(PROFILE_FILE), root.join("profile.md")).unwrap();
+        fs::create_dir_all(root.join("resumes/a")).unwrap();
+        fs::write(root.join("resumes/a/resume.md"), "---\ntitle: A\n---\n\n# Ada\n").unwrap();
+        fs::write(root.join("resumes/a/posting.md"), "Rust").unwrap();
+
+        let ws = Workspace::open(&root).unwrap();
+        let a = ws.read_resume("a").unwrap();
+        assert_eq!(a.content, "---\ntitle: A\n---\n\n# Ada\n"); // renamed, not rewritten
+        assert!(a.summary.has_posting && root.join("resumes/a/posting.md").is_file());
+        assert!(ws.read_profile().unwrap().content.starts_with("# Your Name"));
+        assert!(!root.join("resumes/a/resume.md").exists() && !root.join("profile.md").exists());
+    }
+
+    #[test]
+    fn imported_format_1_files_are_migrated() {
+        let dir = std::env::temp_dir().join(format!("resuflow-import-{}-{}", std::process::id(), now_ms()));
+        fs::create_dir_all(dir.join("resumes/a")).unwrap();
+        fs::write(dir.join("profile.md"), "---\nname: Ada\n---\n\nNotes\n").unwrap();
+        fs::write(dir.join("resumes/a/resume.md"), "---\ntitle: A\n---\n## Work\n").unwrap();
+        let t = TempWs(Workspace::init(&dir).unwrap());
+        assert_eq!(t.0.read_profile().unwrap().content, "# Ada\n\nNotes\n");
+        // Resumes but no template: the migration still runs, and the template is created after.
+        let bare = std::env::temp_dir().join(format!("resuflow-bare-{}-{}", std::process::id(), now_ms()));
+        fs::create_dir_all(bare.join("resumes/b")).unwrap();
+        fs::write(bare.join("resumes/b/resume.md"), "## Work\n").unwrap();
+        let b = TempWs(Workspace::init(&bare).unwrap());
+        assert_eq!(b.0.read_resume("b").unwrap().content, "## Work\n---\n");
+        assert!(b.0.read_profile().unwrap().content.starts_with("# Your Name"));
+        assert!(t.0.read_resume("a").unwrap().content.contains("# Ada\n\n## Work\n---\n"));
     }
 
     #[test]

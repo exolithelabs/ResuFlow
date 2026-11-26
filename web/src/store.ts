@@ -1,6 +1,6 @@
 // Shared app state and the hooks views use to reach each other without circular imports.
 
-import type { Info, Parts, ResumeSummary } from "./api";
+import type { Info, ResumeSummary } from "./api";
 
 export type Route =
   | { kind: "resume"; slug: string }
@@ -23,8 +23,6 @@ export interface View {
 export const store = {
   info: null as Info | null,
   resumes: [] as ResumeSummary[],
-  /** Front matter of the default template: the header every resume falls back to. */
-  profile: {} as Parts["fields"],
   route: { kind: "welcome" } as Route,
 };
 

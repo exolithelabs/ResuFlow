@@ -39,20 +39,16 @@ pub fn get(name: &str) -> Option<Skill> {
     list().into_iter().find(|s| s.name == name)
 }
 
-/// Where an agent looks for user-level skills.
-pub fn agent_dir(agent: &str) -> Result<PathBuf, String> {
+/// The shared user-level skills folder agents read: `~/.agents/skills`.
+pub fn agent_dir() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or("could not find your home folder")?;
-    match agent {
-        "claude" => Ok(home.join(".claude").join("skills")),
-        "agents" => Ok(home.join(".agents").join("skills")),
-        _ => Err(format!("unknown agent '{agent}' (use claude or agents)")),
-    }
+    Ok(home.join(".agents").join("skills"))
 }
 
-/// Copy every built-in skill into an agent's skills folder as `resuflow-<name>/SKILL.md`.
+/// Copy every built-in skill into the shared skills folder as `resuflow-<name>/SKILL.md`.
 /// Only ResuFlow's own folders are written; re-running updates them in place.
-pub fn install(agent: &str) -> Result<PathBuf, String> {
-    let root = agent_dir(agent)?;
+pub fn install() -> Result<PathBuf, String> {
+    let root = agent_dir()?;
     for (name, content) in SKILLS {
         let dir = root.join(format!("{PREFIX}{name}"));
         fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;

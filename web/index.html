@@ -41,10 +41,6 @@
           <select id="status" class="status-select" aria-label="Status"></select>
           <span id="save-state" class="save-state" aria-live="polite"></span>
           <span class="spacer"></span>
-          <div class="segmented" role="group" aria-label="View">
-            <button type="button" data-mode="edit" title="Edit (Ctrl+E)">Edit</button>
-            <button type="button" data-mode="preview" title="Print preview (Ctrl+E)">Preview</button>
-          </div>
           <button id="toggle-inspector" class="icon-btn" type="button" title="Show or hide the side panel (Ctrl+\)" aria-label="Toggle side panel"><i data-icon="panel"></i></button>
           <button id="print" class="btn" type="button" title="Print (Ctrl+P)"><i data-icon="printer"></i><span>Print</span></button>
           <button id="export" class="btn primary" type="button" title="Export PDF (Ctrl+Shift+S)"><i data-icon="download"></i><span>Export PDF</span></button>
@@ -55,22 +51,8 @@
         <div class="workarea">
           <div id="page-scroll" class="page-scroll">
             <article class="page">
-              <header id="resume-header" class="resume-header" data-header>
-                <input name="name" class="h-name" placeholder="Your name" spellcheck="false" aria-label="Name" />
-                <input name="headline" class="h-headline" placeholder="Headline" aria-label="Headline" />
-                <div class="contact">
-                  <input name="email" placeholder="Email" spellcheck="false" aria-label="Email" />
-                  <input name="phone" placeholder="Phone" spellcheck="false" aria-label="Phone" />
-                  <input name="location" placeholder="Location" aria-label="Location" />
-                  <input name="links" placeholder="Links, comma-separated" spellcheck="false" aria-label="Links" />
-                </div>
-                <p class="header-note" id="header-note"></p>
-              </header>
               <div id="editor-host" class="doc"></div>
             </article>
-          </div>
-          <div id="preview" class="preview" hidden>
-            <iframe id="preview-frame" title="Print preview"></iframe>
           </div>
 
           <aside id="inspector" class="inspector" aria-label="Resume panel">
@@ -129,23 +111,13 @@
         <header class="toolbar">
           <div class="view-title">
             <h1>Default template</h1>
-            <p>Your details print as the header of every resume. The text below is copied into each new one.</p>
+            <p>Every new resume starts as a copy of this, header included.</p>
           </div>
           <span id="template-state" class="save-state" aria-live="polite"></span>
         </header>
         <div id="template-banner" class="banner" role="alert" hidden></div>
         <div class="page-scroll">
           <article class="page">
-            <header id="template-header" class="resume-header" data-header>
-              <input name="name" class="h-name" placeholder="Your name" spellcheck="false" aria-label="Name" />
-              <input name="headline" class="h-headline" placeholder="Headline" aria-label="Headline" />
-              <div class="contact">
-                <input name="email" placeholder="Email" spellcheck="false" aria-label="Email" />
-                <input name="phone" placeholder="Phone" spellcheck="false" aria-label="Phone" />
-                <input name="location" placeholder="Location" aria-label="Location" />
-                <input name="links" placeholder="Links, comma-separated" spellcheck="false" aria-label="Links" />
-              </div>
-            </header>
             <div id="template-editor" class="doc"></div>
           </article>
         </div>
@@ -178,8 +150,7 @@
             <p>Writing playbooks built into ResuFlow. Connected agents load them on demand.</p>
           </div>
           <span class="spacer"></span>
-          <button class="btn" type="button" data-install="claude" title="Copy all skills to ~/.claude/skills"><i data-icon="download"></i><span>Install in Claude Code</span></button>
-          <button class="btn" type="button" data-install="agents" title="Copy all skills to ~/.agents/skills (Codex and others)"><i data-icon="download"></i><span>Install for other agents</span></button>
+          <button id="install-skills" class="btn" type="button" title="Copy all skills to ~/.agents/skills, the shared folder agents read skills from"><i data-icon="download"></i><span>Install skills</span></button>
         </header>
         <div class="split">
           <nav id="skill-list" class="skill-list" aria-label="Skills"></nav>
@@ -207,13 +178,8 @@
         <div class="scroll">
           <div class="narrow connect">
             <section class="card">
-              <h2>Claude Code</h2>
-              <p>Run once in a terminal:</p>
-              <div class="copy-row"><code id="cc-cmd"></code><button type="button" class="btn ghost small" data-copy="cc-cmd"><i data-icon="copy"></i><span class="label">Copy</span></button></div>
-            </section>
-            <section class="card">
-              <h2>Any MCP client</h2>
-              <p>Claude Desktop, Cursor, Codex, Gemini CLI and others: add this to the client's MCP config.</p>
+              <h2>MCP config</h2>
+              <p>Add this to your agent's MCP configuration. Any agent that supports MCP can use it.</p>
               <div class="copy-row"><pre id="mcp-json"></pre><button type="button" class="btn ghost small" data-copy="mcp-json"><i data-icon="copy"></i><span class="label">Copy</span></button></div>
             </section>
             <section class="card">
@@ -251,7 +217,7 @@
           <ol class="steps">
             <li><button type="button" data-route="template"><strong>Fill in your details</strong><span>Name, contact and the starting text for every resume.</span></button></li>
             <li><button type="button" id="welcome-new"><strong>Create your first resume</strong><span>One per role or company you apply to.</span></button></li>
-            <li><button type="button" data-route="connect"><strong>Connect your agent</strong><span>Let Claude or another agent tailor resumes for you.</span></button></li>
+            <li><button type="button" data-route="connect"><strong>Connect your agent</strong><span>Let your AI agent tailor resumes for you.</span></button></li>
           </ol>
         </div>
       </section>

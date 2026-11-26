@@ -62,12 +62,10 @@ export interface Info {
   mcp_config: unknown;
   version: string;
   pdf_export: boolean;
-  preview_base: string;
 }
 /** "profile" or "resume:<slug>" */
 export type FileId = "profile" | `resume:${string}`;
 export type FieldValue = string | string[] | null;
-export type Agent = "claude" | "agents";
 
 export const api = {
   info: () => invoke<Info>("info"),
@@ -97,7 +95,7 @@ export const api = {
   savePdf: (slug: string) => invoke<string | null>("save_pdf", { slug }),
   printResume: (slug: string) => invoke<void>("print_resume", { slug }),
   listSkills: () => invoke<Skill[]>("list_skills"),
-  installSkills: (agent: Agent) => invoke<string>("install_skills", { agent }),
+  installSkills: () => invoke<string>("install_skills"),
 };
 
 export const isConflict = (e: unknown) => String(e).startsWith("conflict");

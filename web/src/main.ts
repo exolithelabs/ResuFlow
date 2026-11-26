@@ -94,7 +94,12 @@ function renderList() {
           "button",
           { type: "button", class: "row-main", title: r.title, onclick: () => void app.navigate({ kind: "resume", slug: r.slug }) },
           h("span", { class: `dot ${r.status}`, title: capitalize(r.status) }),
-          h("span", { class: "row-title" }, r.title),
+          h(
+            "span",
+            { class: "row-title" },
+            h("span", { class: "row-name" }, r.title),
+            r.has_posting && h("span", { title: "Has a target job posting", "aria-label": "has a target job posting", role: "img" }, icon("target")),
+          ),
           h("span", { class: "row-sub" }, ResumeView.describe(r.words, r.tags, r.updated_ms)),
         ),
         h(
@@ -282,8 +287,7 @@ async function poll() {
     const rev = await api.revision();
     if (rev === revision) return;
     revision = rev;
-    const [profile] = await Promise.all([api.readParts("profile"), app.refreshList()]);
-    store.profile = profile.fields;
+    await app.refreshList();
     const route = store.route;
     if (route.kind === "resume" && !store.resumes.some((r) => r.slug === route.slug)) {
       resumeView.close();
@@ -316,7 +320,6 @@ document.addEventListener("keydown", (e) => {
   else if (k === "s" && e.shiftKey && onResume) run(() => resumeView.exportPdf());
   else if (k === "s") run(() => views[store.route.kind].leave());
   else if (k === "p" && onResume) run(() => resumeView.print());
-  else if (k === "e" && onResume) run(() => resumeView.toggleMode());
   else if (k === "\\" && onResume) run(() => resumeView.toggleInspector());
 });
 
@@ -337,14 +340,11 @@ async function boot() {
     trash: new TrashView(),
     welcome: welcomeView,
   };
-  resumeView.setMode("edit");
-  const [profile, instructions, trash] = await Promise.all([
-    api.readParts("profile"),
+  const [instructions, trash] = await Promise.all([
     api.readInstructions(),
     api.listTrash(),
     app.refreshList(),
   ]);
-  store.profile = profile.fields;
   $("count-instructions").textContent = instructions.items.length ? String(instructions.items.length) : "";
   $("count-trash").textContent = trash.length ? String(trash.length) : "";
   revision = await api.revision();

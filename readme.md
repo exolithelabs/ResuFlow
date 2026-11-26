@@ -3,7 +3,7 @@
 Local-first resumes for you and your AI agent.
 
 ResuFlow is a native desktop app (Rust + Tauri) and a built-in [MCP](https://modelcontextprotocol.io) server. You
-write in a single live-preview page (Markdown that renders as you type, like Obsidian) and print from it; your agent (Claude Code, Claude Desktop, Cursor, Codex, Gemini CLI…) reads your
+write in a single live-preview page (Markdown that renders as you type, like Obsidian) and print from it; your AI agent reads your
 profile and edits the same files over stdio. Both see each other's changes live. Everything is plain Markdown in
 ResuFlow's app-data folder, created automatically.
 
@@ -35,16 +35,17 @@ on macOS, `%APPDATA%\resuflow` on Windows. On first run it copies resumes, the d
 ```text
 resuflow/
   resuflow.json             marker
-  profile.md                default template: front matter = printed header · body = copied into each new resume
+  profile.mdx               default template, header included, copied into each new resume
   instructions.md           rules you write; agents read them and do not change them
-  resumes/<slug>/resume.md  one folder per variant
+  resumes/<slug>/resume.mdx one folder per variant
   resumes/<slug>/posting.md optional: the job posting that resume targets
   .trash/                   deleted resumes land here and can be restored; nothing is erased
 ```
 
-In the app, a resume is one page that looks like the printout: the header (name, headline, email, phone,
-location, links) and the body edit in place. A new resume starts as a copy of the default template, or of another
-resume. Next to the page, a side panel shows:
+In the app, a resume is one page of Markdown that looks like the printout. All of it edits in place, Obsidian-style,
+header and section rules included: formatting renders as you type, and the raw Markdown (`#`, `**`, `---`) shows
+on the line the cursor is on. Right-click for a formatting menu. A new resume starts as a copy of the default
+template, or of another resume. Next to the page, a side panel shows:
 
 - **Review**: word count, quantified bullets, estimated pages and deterministic checks (weak openers, long
   bullets, tables, leftovers from the template). Click a finding to jump to its line.
@@ -52,18 +53,23 @@ resume. Next to the page, a side panel shows:
   resume covers and which are missing. Your agent sees the same posting and coverage.
 - **Details**: tags, the file on disk, duplicate and move to trash (with Undo).
 
-**Preview** (Ctrl+E) shows the exact page that prints. On disk a resume is Markdown with a little front matter (new
-resumes start with just a title and the header fields):
+On disk a resume is an `.mdx` file: Markdown with a little front matter, plus two optional styling components. The body opens with the header: a `# Name` line, a
+headline line, then a contact line whose items are separated by ` · ` (emails, phone numbers and web addresses print
+as links). A `---` under a section heading prints as its rule.
 
 ```markdown
 ---
 title: Senior Backend Engineer, Acme
 status: draft            # draft | ready | sent | archived
 tags: [acme, rust]
-headline: Payments platform engineer   # optional; overrides profile.md
 ---
 
+# Ada Lovelace
+Payments platform engineer
+Pune · ada@example.com · +91 98765 43210 · github.com/ada
+
 ## Experience
+---
 
 ### Senior Backend Engineer — Fintra
 *Jan 2022 – Present · Pune*
@@ -71,13 +77,35 @@ headline: Payments platform engineer   # optional; overrides profile.md
 - Cut p99 checkout latency 41% by moving pricing to a read-through cache.
 ```
 
+To style words or a rule, use the two components below. They render live in the editor and print the same way:
+
+```mdx
+## <Text color="#1f4e8c" size="10pt" caps spacing="0.08em">Experience</Text>
+<Rule color="#d6d9de" />
+
+Cut latency <Text color="#b42318">41%</Text> by <Text underline underlineColor="#1f4e8c">moving pricing to a cache</Text>.
+```
+
+`<Text>` takes any of `color`, `underline`, `underlineColor`, `size`, `caps`, `spacing` and `font` (`serif`, `sans` or
+`mono`); `<Rule />`, on its own line, takes `color`. Attribute values are quoted strings (or a bare `underline` or
+`caps`); colours are hex, CSS names, `rgb()` or `hsl()`, and sizes are lengths such as `9.5pt` or `0.08em`.
+
+The default template uses this styling for its look: a muted headline and contact line, small blue capitals for
+section headings and muted dates. Right-click in the editor for colour and underline-colour swatches, font chips (small,
+large, capitals, spacing, serif, mono), rule colour, and **Apply resume style**, which gives a plain resume the
+template's look in one step. With nothing selected, styling applies to the whole heading or header line, or to the
+word at the cursor. That is the whole
+of the MDX ResuFlow reads: nothing in a resume runs as code, and other tags, imports or `{expressions}` print as plain
+text.
+
+Workspaces from earlier versions, which kept the header in front matter, are converted the first time they open: `.md` files are renamed
+to `.mdx` (their text is unchanged), and if the header was still in front matter, each resume gets the header it used to
+print, filled in from the default template where it relied on it.
+
 ## Connect an agent
 
-In the app, open **Connect an agent** (bottom of the sidebar) for a ready-to-copy config, or:
-
-```bash
-claude mcp add resuflow -- resuflow mcp        # Claude Code
-```
+In the app, open **Connect an agent** (bottom of the sidebar) for a ready-to-copy config, or add this to your
+agent's MCP configuration (`resuflow mcp-config` prints it with the full path of this install):
 
 ```json
 { "mcpServers": { "resuflow": { "command": "resuflow", "args": ["mcp"] } } }
@@ -94,9 +122,9 @@ instructions, the built-in skills, this connection and the trash. You edit instr
 
 ResuFlow ships four read-only writing skills: `role-research`, `impact-bullets`, `ats-pass` and `recruiter-review`.
 Agents load them over MCP (`read_skill`, or as MCP prompts). To give your agent its own copy, open
-**Skills** in the sidebar and choose **Install in Claude Code** (`~/.claude/skills`) or **Install for other agents**
-(`~/.agents/skills`), or run `resuflow install-skills claude|agents`. They install as `resuflow-<name>`, so
-they never overwrite your own skills.
+**Skills** in the sidebar and choose **Install skills**, or run `resuflow install-skills`. They are copied into
+`~/.agents/skills`, the shared folder agents read skills from, as `resuflow-<name>`, so they never overwrite your own
+skills.
 
 ## Command line
 
@@ -107,7 +135,7 @@ resuflow mcp-config                    print client config for this install
 resuflow list | check SLUG | render SLUG [-o FILE]
 resuflow pdf SLUG -o FILE              save as PDF (Linux)
 resuflow trash | restore ID            list deleted resumes, bring one back
-resuflow install-skills claude|agents  copy built-in skills into an agent
+resuflow install-skills                copy built-in skills to ~/.agents/skills
 ```
 
 For development, `--dir DIR` or `$RESUFLOW_DIR` points any command at another folder.
@@ -125,11 +153,11 @@ time ResuFlow asks you for a location. Direct PDF export uses WebKitGTK and work
 | --- | --- |
 | Ctrl+N | New resume |
 | Ctrl+K | Search resumes (↑ ↓ Enter to open) |
-| Ctrl+E | Switch between editing and the print preview |
 | Ctrl+\\ | Show or hide the side panel |
 | Ctrl+S | Save now (everything also saves as you type) |
 | Ctrl+P · Ctrl+Shift+S | Print · Export PDF |
-| Ctrl+B · Ctrl+I | Bold · italic in the editor |
+| Ctrl+B · Ctrl+I · Ctrl+U | Bold · italic · underline in the editor |
+| Right-click | Formatting and styling menu in the resume and template editors (Shift+right-click for spelling) |
 
 ## Develop
 
@@ -149,7 +177,7 @@ To use the release binary everywhere, put it on your PATH, for example
 Layout: `src-tauri/src/` holds the Rust core (`workspace`, `doc`, `render`, `lint`, `skills`), the MCP server (`mcp`), the
 desktop shell (`app`) and the CLI (`main`). `web/src/` holds the UI in vanilla TypeScript: `main.ts` (sidebar, routing,
 live reload), `resume.ts` (the resume page and side panel), `views.ts` (template, instructions, skills, connect, trash),
-`livemd.ts` (the CodeMirror 6 live-preview editor) and `ui.ts` (helpers, toasts, hash-guarded autosave). `skills/` holds
+`livemd.ts` (the CodeMirror 6 live-preview editor), `editmenu.ts` (its right-click formatting menu) and `ui.ts` (helpers, toasts, hash-guarded autosave). `skills/` holds
 the built-in skills, which are compiled into the binary.
 
 ## License

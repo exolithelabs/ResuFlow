@@ -26,7 +26,7 @@ Usage:
   resuflow pdf SLUG -o FILE        Save as PDF (Linux)
   resuflow trash                   List deleted resumes
   resuflow restore ID              Restore a deleted resume
-  resuflow install-skills claude|agents   Copy built-in skills into an agent
+  resuflow install-skills          Copy built-in skills to ~/.agents/skills
   resuflow --help | --version
 
 Data lives in your app-data folder (Linux: ~/.local/share/resuflow).
@@ -65,7 +65,7 @@ fn main() -> ExitCode {
             let r = ws.check(&slug).map_err(|e| e.0)?;
             println!("{} words · {} bullets ({} quantified) · ~{} pages", r.words, r.bullets, r.bullets_with_numbers, r.est_pages);
             for f in &r.findings {
-                let at = f.line.map(|l| format!("resume.md:{l}  ")).unwrap_or_default();
+                let at = f.line.map(|l| format!("resume.mdx:{l}  ")).unwrap_or_default();
                 println!("{:<5}  {at}{}", f.level, f.message);
             }
             if let Some(k) = &r.keywords {
@@ -101,11 +101,7 @@ fn main() -> ExitCode {
             Ok(())
         }),
         "install-skills" => {
-            match arg(1) {
-                Some(agent) => skills::install(&agent)
-                    .map(|p| println!("Installed {} skills into {}", skills::list().len(), p.display())),
-                None => Err("usage: resuflow install-skills claude|agents".into()),
-            }
+            skills::install().map(|p| println!("Installed {} skills into {}", skills::list().len(), p.display()))
         }
         _ if cmd.starts_with('-') => Err(format!("unknown option {cmd}\n\n{HELP}")),
         "" => {

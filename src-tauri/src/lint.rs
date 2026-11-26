@@ -3,6 +3,7 @@
 //! both use these as a fast, objective first pass.
 
 use crate::doc::Doc;
+use crate::render::{plain_text, split_header, strip_components};
 use crate::workspace::{count_words, Result, Workspace};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -12,7 +13,7 @@ pub struct Finding {
     /// "error" | "warn" | "info"
     pub level: &'static str,
     pub message: String,
-    /// 1-based line in resume.md, when the finding points at one line.
+    /// 1-based line in resume.mdx, when the finding points at one line.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<usize>,
 }
@@ -45,35 +46,33 @@ const WEAK_OPENERS: [&str; 10] = [
     "participated in", "duties included", "in charge of", "was part of",
 ];
 
-const PLACEHOLDERS: [&str; 6] = [
-    "Your Name", "you@example.com", "Achievement with a measurable result", "Role — Company",
-    "Two or three lines aimed at this role", "Degree — Institution",
+const PLACEHOLDERS: [&str; 7] = [
+    "Your Name", "you@example.com", "What you do, in one line", "Achievement with a measurable result",
+    "Role — Company", "Two or three lines aimed at this role", "Degree — Institution",
 ];
 
 impl Workspace {
     pub fn check(&self, slug: &str) -> Result<Report> {
         let content = self.read_resume(slug)?.content;
         let posting = self.read_posting(slug)?.content;
-        Ok(check_doc(&self.profile(), &content, Some(&posting).filter(|p| !p.trim().is_empty()).map(|p| p.as_str())))
+        Ok(check_doc(&content, Some(&posting).filter(|p| !p.trim().is_empty()).map(|p| p.as_str())))
     }
 }
 
-pub fn check_doc(profile: &Doc, content: &str, posting: Option<&str>) -> Report {
+pub fn check_doc(content: &str, posting: Option<&str>) -> Report {
     let resume = Doc::parse(content);
     let mut f: Vec<Finding> = Vec::new();
     let mut add = |level, message: String, line| f.push(Finding { level, message, line });
 
-    let field = |k: &str| resume.str(k).or_else(|| profile.str(k));
-    if field("name").is_none() {
-        add("error", "No name: set it in the header or on the default template.".into(), None);
+    let header = split_header(&resume.body);
+    if header.as_ref().is_none_or(|h| plain_text(h.name).is_empty()) {
+        add("error", "No name: start the resume with a \"# Your Name\" line.".into(), None);
     }
-    if field("email").is_none() && field("phone").is_none() {
-        add("error", "No email or phone: recruiters and ATS parsers need a way to reach you.".into(), None);
-    }
-    for (k, stock) in [("name", "Your Name"), ("email", "you@example.com"), ("headline", "What you do, in one line")] {
-        if field(k).as_deref() == Some(stock) {
-            add("warn", format!("The {k} is still the template's sample value."), None);
-        }
+    let reachable = header.as_ref().is_some_and(|h| {
+        h.contact.iter().any(|l| l.contains('@') || l.bytes().filter(u8::is_ascii_digit).count() >= 7)
+    });
+    if !reachable {
+        add("error", "No email or phone: add a contact line under your name (London · you@example.com · +44 …).".into(), None);
     }
 
     // The body starts after the front matter; findings keep real file line numbers.
@@ -86,7 +85,8 @@ pub fn check_doc(profile: &Doc, content: &str, posting: Option<&str>) -> Report 
 
     for (i, raw) in resume.body.lines().enumerate() {
         let line = body_start + i + 1;
-        let t = raw.trim();
+        let plain = strip_components(raw); // judge the words, not the <Text> styling around them
+        let t = plain.trim();
         if t.starts_with("```") || t.starts_with("~~~") {
             in_code = !in_code;
             continue;
@@ -156,7 +156,7 @@ pub fn check_doc(profile: &Doc, content: &str, posting: Option<&str>) -> Report 
         add("warn", format!("Long ({words} words, ~{est_pages:.1} pages). Trim to what this role needs."), None);
     }
 
-    let keywords = posting.map(|p| coverage(&key_terms(p), content));
+    let keywords = posting.map(|p| coverage(&key_terms(p), &strip_components(content)));
     if let Some(k) = &keywords {
         if !k.missing.is_empty() && k.coverage < 60 {
             add("warn", format!("Covers {}% of the posting's key terms. See which are missing.", k.coverage), None);
@@ -284,14 +284,13 @@ mod tests {
 
     #[test]
     fn flags_common_problems() {
-        let p = Doc::parse("---\nname: A\nemail: a@b.c\n---\n");
-        let src = "---\ntitle: T\n---\n\n## Experience\n\n- Responsible for the build\n- Cut costs 30%\n| a | b |\n\n```\n- Responsible for code\n```\n";
-        let r = check_doc(&p, src, None);
+        let src = "---\ntitle: T\n---\n\n# A\na@b.c\n\n## Experience\n\n- Responsible for the build\n- Cut costs 30%\n| a | b |\n\n```\n- Responsible for code\n```\n";
+        let r = check_doc(src, None);
         assert_eq!(r.bullets, 2);
         assert_eq!(r.bullets_with_numbers, 1);
         let weak: Vec<_> = r.findings.iter().filter(|f| f.message.starts_with("Weak")).collect();
         assert_eq!(weak.len(), 1);
-        assert_eq!(weak[0].line, Some(7));
+        assert_eq!(weak[0].line, Some(10));
         assert!(r.findings.iter().any(|f| f.message.starts_with("Table")));
         assert!(!r.findings.iter().any(|f| f.level == "error"));
         assert!(r.keywords.is_none());
@@ -299,10 +298,18 @@ mod tests {
 
     #[test]
     fn repeated_openers() {
-        let p = Doc::parse("---\nname: A\nemail: a@b.c\n---\n");
-        let r = check_doc(&p, "## Experience\n- Led a 1\n- Led b 2\n- Led c 3\n- Skills: x\n", None);
+        let r = check_doc("# A\na@b.c\n## Experience\n- Led a 1\n- Led b 2\n- Led c 3\n- Skills: x\n", None);
         let f = r.findings.iter().find(|f| f.message.contains("\"led\"")).unwrap();
-        assert_eq!(f.line, Some(2));
+        assert_eq!(f.line, Some(4));
+    }
+
+    #[test]
+    fn header_checks() {
+        let errors = |src: &str| check_doc(src, None).findings.into_iter().filter(|f| f.level == "error").count();
+        assert_eq!(errors("## Experience\n- Cut costs 30%\n"), 2);
+        assert_eq!(errors("# Ada\nEngineer\nLondon\n"), 1);
+        assert_eq!(errors("# Ada\nEngineer\nLondon · +44 20 7946 0000\n"), 0);
+        assert_eq!(errors("# <Text color=\"red\"></Text>\nLondon · a@b.c\n"), 1); // a styled but empty name
     }
 
     #[test]

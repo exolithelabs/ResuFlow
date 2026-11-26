@@ -48,7 +48,6 @@ struct Info {
     mcp_config: Value,
     version: &'static str,
     pdf_export: bool,
-    preview_base: String,
 }
 
 #[tauri::command]
@@ -59,7 +58,6 @@ fn info(s: State<AppState>) -> Res<Info> {
         mcp_config: mcp_config(),
         version: env!("CARGO_PKG_VERSION"),
         pdf_export: crate::pdf::supported(),
-        preview_base: preview_url(""),
     })
 }
 
@@ -159,8 +157,8 @@ fn list_skills() -> Vec<Skill> {
 }
 
 #[tauri::command]
-fn install_skills(agent: String) -> Res<String> {
-    skills::install(&agent).map(|p| p.display().to_string())
+fn install_skills() -> Res<String> {
+    skills::install().map(|p| p.display().to_string())
 }
 
 static PRINT_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -190,7 +188,8 @@ async fn save_pdf(app: tauri::AppHandle, s: State<'_, AppState>, slug: String) -
     use tauri_plugin_dialog::DialogExt;
     let (title, name) = with(&s, |w| {
         let r = crate::doc::Doc::parse(&w.read_resume(&slug)?.content);
-        Ok((r.str("title").unwrap_or_else(|| slug.clone()), r.str("name").or_else(|| w.profile().str("name"))))
+        let name = crate::render::split_header(&r.body).map(|h| crate::render::plain_text(h.name)).filter(|n| !n.is_empty());
+        Ok((r.str("title").unwrap_or_else(|| slug.clone()), name))
     })?;
     let mut dialog = app
         .dialog()

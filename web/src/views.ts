@@ -1,7 +1,7 @@
 // Workspace views: the default template, instructions, built-in skills, connecting an agent, and the trash.
 
-import { api, type Agent, type FieldValue, type Parts, type Skill, type TrashEntry } from "./api";
-import { fillHeader, onHeaderEdit } from "./header";
+import { api, type Skill, type TrashEntry } from "./api";
+import { attachEditMenu } from "./editmenu";
 import { createLiveEditor } from "./livemd";
 import { app, store, type Route, type View } from "./store";
 import { $, Autosave, copyText, h, icon, paintSaveState, relTime, showError, toast } from "./ui";
@@ -21,21 +21,20 @@ function conflictBanner(banner: HTMLElement, message: string, theirs: () => Prom
 
 export class TemplateView implements View {
   section = $("view-template");
-  private header = $("template-header");
   private state = $("template-state");
   private banner = $("template-banner");
   private loaded = false;
 
   private editor = createLiveEditor({
     parent: $("template-editor"),
-    placeholder: "What every new resume starts with: your usual sections, roles and bullets.",
+    placeholder: "What every new resume starts with: # your name, a headline and contact line, then your usual sections.",
+    header: true,
     onChange: () => this.save.touch(),
   });
 
   private save = new Autosave({
     write: async (hash) => {
       const p = await api.writeBody("profile", this.editor.get(), hash);
-      this.apply(p);
       return p.hash;
     },
     state: (s, d) => paintSaveState(this.state, s, d),
@@ -44,7 +43,7 @@ export class TemplateView implements View {
   });
 
   constructor() {
-    onHeaderEdit(this.header, (field, value) => void this.setField(field, value));
+    attachEditMenu(this.editor); // the same formatting and styling menu as a resume
   }
 
   async show(_route: Route) {
@@ -56,26 +55,12 @@ export class TemplateView implements View {
     await this.save.flush();
   }
 
-  private apply(p: Parts) {
-    store.profile = p.fields;
-    fillHeader(this.header, p.fields);
-  }
-
   private async load(keepPlace: boolean) {
     const p = await api.readParts("profile");
     this.banner.hidden = true;
     this.save.reset(p.hash);
-    this.apply(p);
     this.editor.set(p.body, keepPlace);
     paintSaveState(this.state, "idle");
-  }
-
-  private async setField(field: string, value: FieldValue) {
-    await this.save.apply(async (hash) => {
-      const p = await api.setFields("profile", { [field]: value }, hash);
-      this.apply(p);
-      return p.hash;
-    });
   }
 
   async onDiskChange() {
@@ -203,16 +188,14 @@ export class SkillsView implements View {
   constructor() {
     this.viewer.setReadOnly(true);
     $("skill-copy").onclick = (e) => this.current && void copyText(e.currentTarget as HTMLElement, this.current.content);
-    for (const b of this.section.querySelectorAll<HTMLButtonElement>("[data-install]")) {
-      b.onclick = async () => {
-        try {
-          const dir = await api.installSkills(b.dataset.install as Agent);
-          toast(`Installed ${this.skills.length} skills in ${dir}`);
-        } catch (e) {
-          showError(e);
-        }
-      };
-    }
+    $("install-skills").onclick = async () => {
+      try {
+        const dir = await api.installSkills();
+        toast(`Installed ${this.skills.length} skills in ${dir}`);
+      } catch (e) {
+        showError(e);
+      }
+    };
   }
 
   async show(route: Route) {
@@ -254,7 +237,6 @@ export class ConnectView implements View {
 
   async show() {
     const info = store.info!;
-    $("cc-cmd").textContent = `claude mcp add resuflow -- ${shellQuote(info.exe)} mcp`;
     $("mcp-json").textContent = JSON.stringify(info.mcp_config, null, 2);
     $("data-root").textContent = info.root;
     $("app-version").textContent = info.version;
@@ -262,10 +244,6 @@ export class ConnectView implements View {
 
   async leave() {}
   async onDiskChange() {}
-}
-
-function shellQuote(s: string) {
-  return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 // ================================================================ trash

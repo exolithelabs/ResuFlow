@@ -1,16 +1,12 @@
-// The resume view: one live-preview page that looks like the printout, a print preview,
-// and a side panel with checks, the target job posting and details.
+// The resume view: one live-preview page that looks like the printout (edit it in place,
+// Obsidian-style), and a side panel with checks, the target job posting and details.
 
-import { api, STATUSES, str, list, type FieldValue, type Parts, type Report, type Status } from "./api";
-import { fillHeader, onHeaderEdit } from "./header";
-import { createLiveEditor } from "./livemd";
+import { api, STATUSES, str, list, type Parts, type Report, type Status } from "./api";
+import { attachEditMenu } from "./editmenu";
+import { createLiveEditor, stripComponents } from "./livemd";
 import { app, store, type Route, type View } from "./store";
 import { $, Autosave, capitalize, h, icon, paintSaveState, plural, relTime, showError, toast, wordCount } from "./ui";
 
-type Mode = "edit" | "preview";
-
-/** CSS pixels the rendered A4 page needs: 210mm plus the preview's margins. */
-const PREVIEW_WIDTH = 860;
 type Tab = "review" | "target" | "details";
 
 const pref = {
@@ -35,7 +31,6 @@ export class ResumeView implements View {
   slug: string | null = null;
   private fields: Parts["fields"] = {};
   private bodyOffset = 0;
-  private mode: Mode = "edit";
   private postingHash = "";
   private checkTimer = 0;
 
@@ -44,11 +39,7 @@ export class ResumeView implements View {
     status: $<HTMLSelectElement>("status"),
     saveState: $("save-state"),
     banner: $("banner"),
-    header: $("resume-header"),
-    headerNote: $("header-note"),
     pageScroll: $("page-scroll"),
-    preview: $("preview"),
-    frame: $<HTMLIFrameElement>("preview-frame"),
     workarea: this.section.querySelector<HTMLElement>(".workarea")!,
     inspectorBtn: $("toggle-inspector"),
     findings: $("findings"),
@@ -60,14 +51,15 @@ export class ResumeView implements View {
 
   private editor = createLiveEditor({
     parent: $("editor-host"),
-    placeholder: "Start writing. ## starts a section, ### a role, - a bullet.",
+    placeholder: "# Your name, then a headline line and a contact line. ## starts a section, ### a role, - a bullet.",
+    header: true,
     onChange: (text) => {
-      $("stat-words").textContent = String(wordCount(text));
+      $("stat-words").textContent = String(wordCount(stripComponents(text)));
       this.save.touch();
     },
   });
 
-  /** The resume file: body edits and header/meta changes share one hash. */
+  /** The resume file: body edits and meta changes share one hash. */
   private save = new Autosave({
     write: async (hash) => {
       const p = await api.writeBody(this.file, this.editor.get(), hash);
@@ -98,6 +90,7 @@ export class ResumeView implements View {
   });
 
   constructor() {
+    attachEditMenu(this.editor);
     this.el.status.replaceChildren(...STATUSES.map((s) => new Option(capitalize(s), s)));
     this.el.status.addEventListener("change", () => void this.setMeta({ status: this.el.status.value as Status }));
     this.el.title.addEventListener("change", () => {
@@ -113,12 +106,6 @@ export class ResumeView implements View {
       }
     });
 
-    onHeaderEdit(this.el.header, (field, value) => void this.setField(field, value));
-
-    for (const b of this.section.querySelectorAll<HTMLButtonElement>("[data-mode]")) {
-      b.onclick = () => this.setMode(b.dataset.mode as Mode);
-    }
-    new ResizeObserver(() => this.fitPreview()).observe(this.el.preview);
     this.el.inspectorBtn.onclick = () => this.toggleInspector();
     const inspector = pref.get("inspector");
     this.toggleInspector(inspector ? inspector === "1" : innerWidth >= 1180); // narrow windows: it would cover the page
@@ -168,7 +155,7 @@ export class ResumeView implements View {
     this.hideBanner();
     await this.load(false);
     this.el.pageScroll.scrollTop = 0;
-    if (this.mode === "edit") this.editor.focus();
+    this.editor.focus();
   }
 
   async leave() {
@@ -193,11 +180,10 @@ export class ResumeView implements View {
     const scroll = this.el.pageScroll.scrollTop;
     this.editor.set(p.body, keepPlace);
     if (keepPlace) this.el.pageScroll.scrollTop = scroll;
-    $("stat-words").textContent = String(wordCount(p.body));
+    $("stat-words").textContent = String(wordCount(stripComponents(p.body)));
     paintSaveState(this.el.saveState, "idle");
     await this.loadPosting();
     await this.refreshChecks();
-    this.refreshPreview();
   }
 
   private async loadPosting() {
@@ -216,15 +202,9 @@ export class ResumeView implements View {
     const status = STATUSES.includes(str(p.fields.status) as Status) ? str(p.fields.status) : "draft";
     this.el.status.value = status;
     this.el.status.dataset.status = status;
-    this.fillHeader();
     this.renderTags();
-    $("fact-slug").textContent = `resumes/${this.slug}/resume.md`;
+    $("fact-slug").textContent = `resumes/${this.slug}/resume.mdx`;
     $("fact-updated").textContent = summary ? relTime(summary.updated_ms) : "just now";
-  }
-
-  private fillHeader() {
-    const n = fillHeader(this.el.header, this.fields, store.profile);
-    this.el.headerNote.textContent = n ? "Grey fields come from your default template. Edit one to set it for this resume only." : "";
   }
 
   private afterSave() {
@@ -237,22 +217,11 @@ export class ResumeView implements View {
 
   // ---------------------------------------------------------------- edits
 
-  private async setField(field: string, value: FieldValue) {
-    if (!this.slug) return;
-    await this.save.apply(async (hash) => {
-      const p = await api.setFields(this.file, { [field]: value }, hash);
-      this.applyParts(p);
-      this.afterSave();
-      return p.hash;
-    });
-  }
-
   async setMeta(meta: { title?: string; status?: Status; tags?: string[] }) {
     if (!this.slug) return;
     await this.save.apply(async (hash) => {
       const p = await api.setMeta(this.slug!, meta, hash);
       this.applyParts(p);
-      this.refreshPreview();
       await app.refreshList();
       return p.hash;
     });
@@ -309,8 +278,6 @@ export class ResumeView implements View {
       if (this.postingSave.dirty) this.postingSave.markConflict();
       else await this.loadPosting();
     }
-    this.fillHeader(); // the default template may have changed
-    this.refreshPreview();
     if (changed) await this.refreshChecks();
   }
 
@@ -379,38 +346,10 @@ export class ResumeView implements View {
   }
 
   private gotoLine(line: number) {
-    if (this.mode !== "edit") this.setMode("edit");
     this.editor.gotoLine(line);
   }
 
   // ---------------------------------------------------------------- layout
-
-  setMode(mode: Mode) {
-    this.mode = mode;
-    for (const b of this.section.querySelectorAll<HTMLElement>("[data-mode]")) b.classList.toggle("on", b.dataset.mode === mode);
-    this.el.pageScroll.hidden = mode !== "edit";
-    this.el.preview.hidden = mode !== "preview";
-    if (mode === "preview") void this.save.flush().then(() => this.refreshPreview());
-    else this.editor.focus();
-  }
-
-  toggleMode() {
-    this.setMode(this.mode === "edit" ? "preview" : "edit");
-  }
-
-  private refreshPreview() {
-    if (this.mode !== "preview" || !this.slug || !store.info) return;
-    this.el.frame.src = `${store.info.preview_base}${this.slug}?t=${Date.now()}`;
-  }
-
-  /** Keep the preview's print line breaks: scale the page down rather than letting it reflow. */
-  private fitPreview() {
-    const { width, height } = this.el.preview.getBoundingClientRect();
-    if (!width) return;
-    const natural = Math.max(width, PREVIEW_WIDTH);
-    const k = width / natural;
-    Object.assign(this.el.frame.style, { width: `${natural}px`, height: `${height / k}px`, transform: k < 1 ? `scale(${k})` : "" });
-  }
 
   toggleInspector(open = this.el.workarea.classList.contains("no-inspector")) {
     this.el.workarea.classList.toggle("no-inspector", !open);

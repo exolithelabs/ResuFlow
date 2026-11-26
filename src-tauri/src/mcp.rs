@@ -17,11 +17,16 @@ const SUPPORTED: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11
 
 const INSTRUCTIONS: &str = "ResuFlow keeps the user's resumes as Markdown files in a local workspace. \
 Start with get_workspace: it returns the default template's name and headline, the user's instructions, every resume and the skills. \
-profile.md is the default template. Its front matter (name, headline, email, phone, location, links) prints as the header of every resume; \
-its body is copied into each new resume. Mine it for facts; never invent experience or metrics. \
+profile.mdx is the default template, copied into each new resume. Mine it for facts; never invent experience or metrics. \
 The user's instructions are rules: follow them. Only the user changes them, in the app. \
-Each resume is resumes/<slug>/resume.md: front matter (title, status, tags, optional header overrides) and a Markdown body with \
-## sections, ### Role — Company headings, an *dates · place* line and - bullets. \
+Each resume is resumes/<slug>/resume.mdx: front matter (title, status, tags) and a Markdown body. The body opens with the header: \
+a \"# Name\" line, a headline line under it, then a contact line (City · email · phone · links, separated by \" · \"). \
+Then ## sections, each followed by a --- line that prints as the rule under it, ### Role — Company headings, \
+an *dates · place* line and - bullets. \
+Two components add styling, nothing else is MDX: <Text color=\"#1f4e8c\" size=\"10pt\" caps spacing=\"0.08em\">words</Text> \
+(attributes: color, underline, underlineColor, size, caps, spacing, font=serif|sans|mono) and <Rule color=\"#d6d9de\" /> \
+on its own line for a coloured rule. Attributes are quoted strings or bare booleans; colours are hex, CSS names or rgb()/hsl(), \
+sizes are lengths such as 9.5pt or 0.08em. Keep the styling a resume already has when you edit it. No imports, exports or {expressions}. \
 A resume can have a target job posting (read_posting / set_posting); check_resume then reports which of its key terms the resume covers. \
 Prefer edit_resume for targeted changes and pass the expected_hash from your last read, so you never overwrite the user's \
 concurrent edits in the desktop app. Run check_resume after editing. \
@@ -102,11 +107,12 @@ impl Server {
         match name {
             "get_workspace" => {
                 let profile = ws.profile();
+                let header = crate::render::split_header(&profile.body);
                 Ok(json!({
                     "root": ws.root,
                     "profile": {
-                        "name": profile.str("name"),
-                        "headline": profile.str("headline"),
+                        "name": header.as_ref().map(|h| crate::render::plain_text(h.name)),
+                        "headline": header.as_ref().and_then(|h| h.headline.first().map(|l| crate::render::plain_text(l))),
                         "template_words": crate::workspace::count_words(&profile.body),
                     },
                     "instructions": ws.read_instructions().map_err(|e| e.0)?.items,
@@ -246,8 +252,8 @@ fn tools() -> Vec<Value> {
     let text = json!({ "type": "string" });
     vec![
         tool("get_workspace", "Overview: data folder, template name and headline, the user's instructions, all resumes, skills. Call first.", json!({}), &[], Read),
-        tool("read_profile", "Read the default template (profile.md). Its front matter prints as every resume's header; its body is copied into each new resume.", json!({}), &[], Read),
-        tool("update_profile", "Replace the default template (profile.md) entirely.", json!({ "content": text, "expected_hash": hash }), &["content"], Write),
+        tool("read_profile", "Read the default template (profile.mdx): the source, header included, that each new resume starts as.", json!({}), &[], Read),
+        tool("update_profile", "Replace the default template (profile.mdx) entirely.", json!({ "content": text, "expected_hash": hash }), &["content"], Write),
         tool("read_instructions", "Read the user's instructions. Follow them. Only the user changes them, in the app.", json!({}), &[], Read),
         tool("list_resumes", "List resumes, most recently edited first, optionally filtered by status or tag.", json!({ "status": status, "tag": text }), &[], Read),
         tool("read_resume", "Read a resume's full Markdown source, metadata and hash.", json!({ "slug": slug }), &["slug"], Read),
@@ -260,7 +266,7 @@ fn tools() -> Vec<Value> {
         tool("restore_resume", "Bring a deleted resume back from the trash. If its slug was reused meanwhile, it gets a numbered one.", json!({ "id": { "type": "string", "description": "Trash id from list_trash" } }), &["id"], Write),
         tool("read_posting", "Read the job posting a resume targets (empty if none).", json!({ "slug": slug }), &["slug"], Read),
         tool("set_posting", "Save the job posting a resume targets, as plain text or Markdown. Empty content removes it. check_resume then reports keyword coverage.", json!({ "slug": slug, "content": text, "expected_hash": hash }), &["slug", "content"], Write),
-        tool("check_resume", "Deterministic checks: missing contact, ATS-hostile tables or images, weak or repetitive openers, unquantified or overlong bullets, leftovers, length, and keyword coverage against the target posting. Line numbers refer to resume.md.", json!({ "slug": slug }), &["slug"], Read),
+        tool("check_resume", "Deterministic checks: missing contact, ATS-hostile tables or images, weak or repetitive openers, unquantified or overlong bullets, leftovers, length, and keyword coverage against the target posting. Line numbers refer to resume.mdx.", json!({ "slug": slug }), &["slug"], Read),
         tool("render_resume", "Render a resume to print-ready A4 HTML, exactly what the app exports. With save=true, writes resumes/<slug>/resume.html and returns its path.", json!({ "slug": slug, "save": { "type": "boolean" } }), &["slug"], Write),
         tool("read_skill", "Load one of ResuFlow's built-in writing skills (role-research, impact-bullets, ats-pass, recruiter-review).", json!({ "name": text }), &["name"], Read),
     ]
@@ -287,9 +293,9 @@ mod tests {
         let r = call(&s, "create_resume", json!({ "title": "Platform Engineer" }));
         assert_eq!(r["isError"], false);
         let hash = r["structuredContent"]["hash"].as_str().unwrap().to_string();
-        let r = call(&s, "edit_resume", json!({ "slug": "platform-engineer", "old_text": "## Skills", "new_text": "## Skills\n\n- Kafka", "expected_hash": hash }));
+        let r = call(&s, "edit_resume", json!({ "slug": "platform-engineer", "old_text": "- Tools:", "new_text": "- Tools: Kafka", "expected_hash": hash }));
         assert_eq!(r["isError"], false);
-        let r = call(&s, "edit_resume", json!({ "slug": "platform-engineer", "old_text": "## Skills", "new_text": "x", "expected_hash": hash }));
+        let r = call(&s, "edit_resume", json!({ "slug": "platform-engineer", "old_text": "- Tools: Kafka", "new_text": "x", "expected_hash": hash }));
         assert_eq!(r["isError"], true);
 
         call(&s, "set_posting", json!({ "slug": "platform-engineer", "content": "We use Kafka and Terraform. Kafka at scale." }));
