@@ -1,6 +1,6 @@
 {
   "name": "resuflow",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Local-first resume builder: native desktop app plus a stdio MCP server for AI agents.",

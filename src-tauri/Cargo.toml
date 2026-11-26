@@ -1,6 +1,6 @@
 [package]
 name = "resuflow"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local-first resume builder with a native desktop app and a stdio MCP server for AI agents."
 authors = ["Dhiraj Yadav"]
 license = "Apache-2.0"
